@@ -8,6 +8,7 @@ import net.neoforged.fml.common.Mod;
 import net.neoforged.fml.config.ModConfig;
 import net.neoforged.fml.event.lifecycle.FMLClientSetupEvent;
 import net.neoforged.neoforge.client.event.ClientTickEvent;
+import net.neoforged.neoforge.client.event.RegisterClientCommandsEvent;
 import net.neoforged.neoforge.client.event.RegisterKeyMappingsEvent;
 import net.neoforged.neoforge.common.NeoForge;
 import org.slf4j.Logger;
@@ -30,6 +31,7 @@ public class Beeeye {
         modEventBus.addListener(this::onRegisterKeyMappings);
 
         NeoForge.EVENT_BUS.addListener(this::onClientTick);
+        NeoForge.EVENT_BUS.addListener(this::onRegisterClientCommands);
     }
 
     private void onClientSetup(FMLClientSetupEvent event) {
@@ -40,6 +42,11 @@ public class Beeeye {
         event.registerCategory(BeeeyeKeyBindings.CATEGORY);
         event.register(BeeeyeKeyBindings.TOGGLE_STEREO);
         LOGGER.info("Beeeye keybindings registered");
+    }
+
+    private void onRegisterClientCommands(RegisterClientCommandsEvent event) {
+        BeeeyeCommand.register(event.getDispatcher());
+        LOGGER.info("Beeeye commands registered");
     }
 
     private void onClientTick(ClientTickEvent.Post event) {
