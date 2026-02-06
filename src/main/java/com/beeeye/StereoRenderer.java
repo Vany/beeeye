@@ -5,6 +5,7 @@ import com.mojang.blaze3d.pipeline.TextureTarget;
 import com.mojang.blaze3d.systems.CommandEncoder;
 import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.textures.GpuTexture;
+import org.lwjgl.opengl.GL30;
 
 /**
  * Stereo 3D renderer — state management and FBO lifecycle.
@@ -32,12 +33,14 @@ public class StereoRenderer {
         }
     }
 
+    // --- Constants ---
+    private static final float DEFAULT_CONVERGENCE = 5.0f;
+
     // --- State flags ---
     private static Eye currentEye = null;
     private static boolean inStereoPass = false;
     private static boolean renderingEye = false;
     private static boolean hudPhase = false;
-    private static boolean useCameraOffset = false;
 
     // --- FBOs ---
     private static RenderTarget leftEyeFbo = null;
@@ -48,6 +51,18 @@ public class StereoRenderer {
     // --- Cached dimensions ---
     private static int lastWidth = 0;
     private static int lastHeight = 0;
+
+    // --- Cached GL FBOs for compositing (managed by MixinGameRenderer, cleaned here) ---
+    private static int mainGlFbo = 0;
+    private static int leftGlFbo = 0;
+    private static int rightGlFbo = 0;
+    private static int hudGlFbo = 0;
+    private static int compositeGlFbo = 0;
+    private static int cachedMainTex = 0;
+    private static int cachedLeftTex = 0;
+    private static int cachedRightTex = 0;
+    private static int cachedHudTex = 0;
+    private static int cachedCompositeTex = 0;
 
     // =========================================================================
     // State accessors
@@ -85,14 +100,6 @@ public class StereoRenderer {
         hudPhase = value;
     }
 
-    public static boolean useCameraOffset() {
-        return useCameraOffset;
-    }
-
-    public static void setUseCameraOffset(boolean value) {
-        useCameraOffset = value;
-    }
-
     // =========================================================================
     // FBO accessors
     // =========================================================================
@@ -120,40 +127,45 @@ public class StereoRenderer {
     }
 
     // =========================================================================
-    // Off-axis projection
+    // Stereo parameters
     // =========================================================================
+
+    /** Get IPD from config (with fallback if config not loaded). */
+    public static float getIPD() {
+        try {
+            return BeeeyeConfig.EYE_DISTANCE.get().floatValue();
+        } catch (Exception e) {
+            return 0.25f; // Default fallback
+        }
+    }
+
+    /** Get convergence distance from config (with fallback if config not loaded). */
+    public static float getConvergence() {
+        try {
+            return BeeeyeConfig.CONVERGENCE.get().floatValue();
+        } catch (Exception e) {
+            return DEFAULT_CONVERGENCE; // Default fallback
+        }
+    }
 
     /**
      * Projection matrix m20 offset for asymmetric frustum stereo.
-     * Camera stays in place; frustum shifts left/right per eye.
-     * Objects at convergence distance have zero parallax.
-     *
-     * Derivation: eye offset in near plane = (IPD/2) * near / convergence.
-     * In projection matrix: m20_shift = eyeOffset_nearPlane / halfWidth_nearPlane
-     *                                 = (IPD/2) / convergence * m00
-     * where m00 = near / halfWidth_nearPlane = 1 / (aspect * tan(fovY/2)).
+     * Frustum shifts left/right per eye; objects at convergence distance have zero parallax.
      *
      * @param m00 the projection matrix m00 element (focal length / aspect)
      */
     public static float getProjectionOffset(float m00) {
         if (currentEye == null) return 0;
-        // TODO: config returns wrong value, hardcode for now
-        float halfIPD = 0.25f / 2.0f; // BeeeyeConfig.EYE_DISTANCE.get().floatValue() / 2.0f;
-        float convergence = 5.0f;
-        // Negative sign: shift frustum opposite to eye offset so both eyes
-        // converge at convergenceDistance. Objects there have zero parallax.
-        return -(currentEye.sign * halfIPD * m00) / convergence;
+        float halfIPD = getIPD() / 2.0f;
+        return -(currentEye.sign * halfIPD * m00) / getConvergence();
     }
 
     /**
-     * Camera X offset for camera-offset stereo (disabled by default).
-     * Only used by MixinCamera when useCameraOffset=true.
+     * Camera X offset: move camera ±IPD/2 along local X axis per eye.
      */
     public static float getEyeOffset() {
         if (currentEye == null) return 0;
-        // TODO: config returns wrong value (0.01 instead of 0.25), hardcode for now
-        float ipd = 0.25f; // BeeeyeConfig.EYE_DISTANCE.get().floatValue();
-        return (currentEye.sign * (ipd / 2.0f));
+        return currentEye.sign * (getIPD() / 2.0f);
     }
 
     // =========================================================================
@@ -242,5 +254,118 @@ public class StereoRenderer {
         }
         lastWidth = 0;
         lastHeight = 0;
+    }
+
+    // =========================================================================
+    // GL FBO management (for MixinGameRenderer compositing)
+    // =========================================================================
+
+    public static int getMainGlFbo() {
+        return mainGlFbo;
+    }
+
+    public static void setMainGlFbo(int fbo) {
+        mainGlFbo = fbo;
+    }
+
+    public static int getLeftGlFbo() {
+        return leftGlFbo;
+    }
+
+    public static void setLeftGlFbo(int fbo) {
+        leftGlFbo = fbo;
+    }
+
+    public static int getRightGlFbo() {
+        return rightGlFbo;
+    }
+
+    public static void setRightGlFbo(int fbo) {
+        rightGlFbo = fbo;
+    }
+
+    public static int getHudGlFbo() {
+        return hudGlFbo;
+    }
+
+    public static void setHudGlFbo(int fbo) {
+        hudGlFbo = fbo;
+    }
+
+    public static int getCompositeGlFbo() {
+        return compositeGlFbo;
+    }
+
+    public static void setCompositeGlFbo(int fbo) {
+        compositeGlFbo = fbo;
+    }
+
+    public static int getCachedMainTex() {
+        return cachedMainTex;
+    }
+
+    public static void setCachedMainTex(int tex) {
+        cachedMainTex = tex;
+    }
+
+    public static int getCachedLeftTex() {
+        return cachedLeftTex;
+    }
+
+    public static void setCachedLeftTex(int tex) {
+        cachedLeftTex = tex;
+    }
+
+    public static int getCachedRightTex() {
+        return cachedRightTex;
+    }
+
+    public static void setCachedRightTex(int tex) {
+        cachedRightTex = tex;
+    }
+
+    public static int getCachedHudTex() {
+        return cachedHudTex;
+    }
+
+    public static void setCachedHudTex(int tex) {
+        cachedHudTex = tex;
+    }
+
+    public static int getCachedCompositeTex() {
+        return cachedCompositeTex;
+    }
+
+    public static void setCachedCompositeTex(int tex) {
+        cachedCompositeTex = tex;
+    }
+
+    /** Cleanup cached GL FBOs used for compositing. */
+    public static void cleanupGlFbos() {
+        if (mainGlFbo != 0) {
+            GL30.glDeleteFramebuffers(mainGlFbo);
+            mainGlFbo = 0;
+        }
+        if (leftGlFbo != 0) {
+            GL30.glDeleteFramebuffers(leftGlFbo);
+            leftGlFbo = 0;
+        }
+        if (rightGlFbo != 0) {
+            GL30.glDeleteFramebuffers(rightGlFbo);
+            rightGlFbo = 0;
+        }
+        if (hudGlFbo != 0) {
+            GL30.glDeleteFramebuffers(hudGlFbo);
+            hudGlFbo = 0;
+        }
+        if (compositeGlFbo != 0) {
+            GL30.glDeleteFramebuffers(compositeGlFbo);
+            compositeGlFbo = 0;
+        }
+        cachedMainTex = 0;
+        cachedLeftTex = 0;
+        cachedRightTex = 0;
+        cachedHudTex = 0;
+        cachedCompositeTex = 0;
     }
 }

@@ -2,7 +2,7 @@
 
 ### Current Implementation: Off-Axis Projection Stereo + HUD Alpha Compositing
 
-**Status**: Compiles, HUD duplicated to both eyes via alpha compositing
+**Status**: Working. Config-driven IPD and convergence. HUD alpha composited to both eyes.
 
 #### Stereo Approaches Tried
 
@@ -87,22 +87,20 @@ used for HUD rendering (hudFbo) and alpha compositing (compositeTarget).
 
 | File | Purpose |
 |------|---------|
-| `StereoRenderer.java` | State, FBOs, composite logic, projection offset calc |
+| `StereoRenderer.java` | State, FBOs, GL FBO cache, projection offset calc |
 | `MixinGameRenderer.java` | Stereo render loop, HUD alpha compositing |
 | `MixinProjectionMatrix.java` | Off-axis projection shift on `getProjectionMatrix()` |
-| `MixinCamera.java` | Camera offset (disabled, toggle via `useCameraOffset`) |
-| `MixinMinecraft.java` | Redirects `getMainRenderTarget()` to hudFbo during HUD phase |
-| `MixinWindow.java` | Fakes width/guiScaledWidth to half during HUD phase |
-| `MixinGui.java` | GUI rendering hooks |
-| `MixinGuiCrosshair.java` | Crosshair convergence offset |
-| `ScreenRenderHandler.java` | Copies screens (inventory) to right half |
-| `BeeeyeKeyBindings.java` | Key bindings (`~` toggle stereo) |
+| `MixinCamera.java` | Camera offset (DISABLED in mixins.json - causes chunk freeze) |
+| `MixinMinecraft.java` | Redirects `getMainRenderTarget()` to eye/HUD FBO |
+| `MixinWindow.java` | Fakes width/guiScaledWidth to half when stereo enabled |
+| `MixinMouseHandler.java` | Translates mouse X for right-eye half |
+| `BeeeyeKeyBindings.java` | Key bindings (`\` backslash toggle stereo) |
+| `BeeeyeConfig.java` | Configuration: eyeDistance, convergence |
 
 #### Configuration
 
-- `eyeDistance`: 0.25 blocks (default), range 0.01-1.0
-- `screenShift`: 0 pixels, horizontal split line adjustment
-- `interfaceShift`: 0 pixels, GUI placement offset
+- `eyeDistance`: 0.25 blocks (default), range 0.01-1.0 — IPD (inter-pupillary distance)
+- `convergence`: 5.0 blocks (default), range 1.0-50.0 — zero parallax distance
 
 #### OpenGL Constraints
 
@@ -115,12 +113,12 @@ used for HUD rendering (hudFbo) and alpha compositing (compositeTarget).
 
 #### Testing Checklist
 
-- [x] Toggle stereo with `~` key
+- [x] Toggle stereo with `\` key (backslash)
 - [x] Entities render with stereo parallax
 - [x] Blocks render with stereo parallax (off-axis projection)
 - [x] Both eyes show world with parallax
-- [ ] HUD appears on both halves (alpha composited)
-- [ ] JourneyMap minimap visible in stereo
-- [ ] Inventory/screens work correctly
+- [x] HUD appears on both halves (alpha composited)
+- [x] JourneyMap minimap visible in stereo
+- [x] Inventory/screens work correctly
 - [ ] Crosshair has convergence offset
 - [ ] No crashes on window resize

@@ -5,6 +5,7 @@ import com.beeeye.StereoRenderer;
 import com.beeeye.StereoRenderer.Eye;
 import com.mojang.blaze3d.pipeline.RenderTarget;
 import com.mojang.blaze3d.textures.GpuTexture;
+import java.lang.reflect.Method;
 import net.minecraft.client.Camera;
 import net.minecraft.client.DeltaTracker;
 import net.minecraft.client.Minecraft;
@@ -23,13 +24,6 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 /**
  * Stereo rendering: each eye renders to its own half-width FBO,
  * then composited to main target. HUD alpha-composited onto both eyes.
- *
- * Eye rendering: redirect getMainRenderTarget() to eye FBO during renderLevel(),
- * so Minecraft renders directly into half-width buffer with correct aspect ratio.
- * Off-axis projection (MixinProjectionMatrix) provides per-eye parallax.
- *
- * HUD: renders to half-width hudFbo (width faking active). In compositing,
- * the same pixels are placed in both eye halves.
  */
 @Mixin(GameRenderer.class)
 public abstract class MixinGameRenderer {
@@ -58,6 +52,22 @@ public abstract class MixinGameRenderer {
     @Unique
     private boolean beeeye$stereoReady = false;
 
+    // Cached reflection methods
+    @Unique
+    private static final java.util.Map<
+        Class<?>,
+        Method
+    > beeeye$glIdMethodCache = new java.util.concurrent.ConcurrentHashMap<>();
+
+    @Unique
+    private static Method beeeye$unwrapMethod = null;
+
+    @Unique
+    private static boolean beeeye$reflectionInitialized = false;
+
+    @Unique
+    private static boolean beeeye$reflectionErrorLogged = false;
+
     /**
      * Intercept renderLevel() — render both eyes into separate half-width FBOs.
      */
@@ -84,8 +94,7 @@ public abstract class MixinGameRenderer {
     }
 
     /**
-     * After render() completes, HUD is in hudFbo. Restore stereo world,
-     * alpha-composite HUD onto both halves.
+     * After render() completes, HUD is in hudFbo. Composite stereo + HUD to main target.
      */
     @Inject(method = "render", at = @At("TAIL"))
     private void beeeye$onRenderTail(
@@ -113,6 +122,7 @@ public abstract class MixinGameRenderer {
         int fullHeight = mainTarget.height;
         int halfWidth = fullWidth / 2;
 
+        // Get texture IDs and ensure cached FBOs are valid
         int mainTexId = beeeye$getTextureId(mainTarget.getColorTexture());
         int leftTexId = beeeye$getTextureId(leftFbo.getColorTexture());
         int rightTexId = beeeye$getTextureId(rightFbo.getColorTexture());
@@ -126,16 +136,57 @@ public abstract class MixinGameRenderer {
             compositeTexId <= 0
         ) return;
 
-        // Temp GL FBOs wrapping RenderTarget textures
-        int mainGlFbo = beeeye$wrapTexAsFbo(mainTexId);
-        int leftGlFbo = beeeye$wrapTexAsFbo(leftTexId);
-        int rightGlFbo = beeeye$wrapTexAsFbo(rightTexId);
-        int hudGlFbo = beeeye$wrapTexAsFbo(hudTexId);
-        int compositeGlFbo = beeeye$wrapTexAsFbo(compositeTexId);
+        // Update cached FBOs if textures changed
+        StereoRenderer.setMainGlFbo(
+            beeeye$ensureFbo(
+                StereoRenderer.getMainGlFbo(),
+                mainTexId,
+                StereoRenderer.getCachedMainTex()
+            )
+        );
+        StereoRenderer.setLeftGlFbo(
+            beeeye$ensureFbo(
+                StereoRenderer.getLeftGlFbo(),
+                leftTexId,
+                StereoRenderer.getCachedLeftTex()
+            )
+        );
+        StereoRenderer.setRightGlFbo(
+            beeeye$ensureFbo(
+                StereoRenderer.getRightGlFbo(),
+                rightTexId,
+                StereoRenderer.getCachedRightTex()
+            )
+        );
+        StereoRenderer.setHudGlFbo(
+            beeeye$ensureFbo(
+                StereoRenderer.getHudGlFbo(),
+                hudTexId,
+                StereoRenderer.getCachedHudTex()
+            )
+        );
+        StereoRenderer.setCompositeGlFbo(
+            beeeye$ensureFbo(
+                StereoRenderer.getCompositeGlFbo(),
+                compositeTexId,
+                StereoRenderer.getCachedCompositeTex()
+            )
+        );
+        StereoRenderer.setCachedMainTex(mainTexId);
+        StereoRenderer.setCachedLeftTex(leftTexId);
+        StereoRenderer.setCachedRightTex(rightTexId);
+        StereoRenderer.setCachedHudTex(hudTexId);
+        StereoRenderer.setCachedCompositeTex(compositeTexId);
 
-        // Restore stereo world: eye FBOs → main target halves
-        GL30.glBindFramebuffer(GL30.GL_READ_FRAMEBUFFER, leftGlFbo);
-        GL30.glBindFramebuffer(GL30.GL_DRAW_FRAMEBUFFER, mainGlFbo);
+        // Blit eye FBOs → main target halves
+        GL30.glBindFramebuffer(
+            GL30.GL_READ_FRAMEBUFFER,
+            StereoRenderer.getLeftGlFbo()
+        );
+        GL30.glBindFramebuffer(
+            GL30.GL_DRAW_FRAMEBUFFER,
+            StereoRenderer.getMainGlFbo()
+        );
         GL30.glBlitFramebuffer(
             0,
             0,
@@ -149,7 +200,10 @@ public abstract class MixinGameRenderer {
             GL11.GL_NEAREST
         );
 
-        GL30.glBindFramebuffer(GL30.GL_READ_FRAMEBUFFER, rightGlFbo);
+        GL30.glBindFramebuffer(
+            GL30.GL_READ_FRAMEBUFFER,
+            StereoRenderer.getRightGlFbo()
+        );
         GL30.glBlitFramebuffer(
             0,
             0,
@@ -163,14 +217,16 @@ public abstract class MixinGameRenderer {
             GL11.GL_NEAREST
         );
 
-        // Copy identical half-width hudFbo to both halves of composite.
-        // Same source pixels → crosshair at same position on both eyes.
+        // Copy hudFbo to both halves of composite
         StereoRenderer.clearFbo(compositeRT);
-
-        GL30.glBindFramebuffer(GL30.GL_READ_FRAMEBUFFER, hudGlFbo);
-        GL30.glBindFramebuffer(GL30.GL_DRAW_FRAMEBUFFER, compositeGlFbo);
-
-        // hudFbo → left half
+        GL30.glBindFramebuffer(
+            GL30.GL_READ_FRAMEBUFFER,
+            StereoRenderer.getHudGlFbo()
+        );
+        GL30.glBindFramebuffer(
+            GL30.GL_DRAW_FRAMEBUFFER,
+            StereoRenderer.getCompositeGlFbo()
+        );
         GL30.glBlitFramebuffer(
             0,
             0,
@@ -183,8 +239,6 @@ public abstract class MixinGameRenderer {
             GL11.GL_COLOR_BUFFER_BIT,
             GL11.GL_NEAREST
         );
-
-        // hudFbo → right half (identical pixels)
         GL30.glBlitFramebuffer(
             0,
             0,
@@ -200,25 +254,15 @@ public abstract class MixinGameRenderer {
 
         GL30.glBindFramebuffer(GL30.GL_FRAMEBUFFER, 0);
         compositeRT.blitAndBlendToTexture(mainTarget.getColorTextureView());
-
-        // Cleanup temp FBOs
-        GL30.glDeleteFramebuffers(mainGlFbo);
-        GL30.glDeleteFramebuffers(leftGlFbo);
-        GL30.glDeleteFramebuffers(rightGlFbo);
-        GL30.glDeleteFramebuffers(hudGlFbo);
-        GL30.glDeleteFramebuffers(compositeGlFbo);
     }
 
     @Unique
     private void beeeye$renderStereoFrame(DeltaTracker deltaTracker) {
         RenderTarget mainTarget = minecraft.getMainRenderTarget();
-        int fullWidth = mainTarget.width;
-        int fullHeight = mainTarget.height;
-
-        StereoRenderer.ensureFramebuffers(fullWidth, fullHeight);
+        StereoRenderer.ensureFramebuffers(mainTarget.width, mainTarget.height);
         StereoRenderer.setInStereoPass(true);
 
-        // === LEFT EYE ===
+        // Left eye
         StereoRenderer.setCurrentEye(Eye.LEFT);
         StereoRenderer.setRenderingEye(true);
         StereoRenderer.clearFbo(StereoRenderer.getLeftEyeFbo());
@@ -227,7 +271,7 @@ public abstract class MixinGameRenderer {
         renderLevel(deltaTracker);
         StereoRenderer.setRenderingEye(false);
 
-        // === RIGHT EYE ===
+        // Right eye
         StereoRenderer.setCurrentEye(Eye.RIGHT);
         StereoRenderer.setRenderingEye(true);
         StereoRenderer.clearFbo(StereoRenderer.getRightEyeFbo());
@@ -239,17 +283,12 @@ public abstract class MixinGameRenderer {
         StereoRenderer.setCurrentEye(null);
         StereoRenderer.setInStereoPass(false);
 
-        // Clear hudFbo, enable HUD phase
+        // Prepare HUD phase
         StereoRenderer.clearFbo(StereoRenderer.getHudFbo());
         beeeye$stereoReady = true;
         StereoRenderer.setHudPhase(true);
     }
 
-    /**
-     * Refresh GlobalSettingsUniform with current camera position.
-     * Must be called after updateCamera() for each eye so the shader
-     * sees the correct camera pos for block vertex transforms.
-     */
     @Unique
     private void beeeye$refreshGlobalUniforms(DeltaTracker deltaTracker) {
         globalSettingsUniform.update(
@@ -265,35 +304,90 @@ public abstract class MixinGameRenderer {
         );
     }
 
+    /** Ensure FBO exists and points to correct texture; recreate if texture changed. */
     @Unique
-    private int beeeye$wrapTexAsFbo(int textureId) {
-        int fbo = GL30.glGenFramebuffers();
+    private static int beeeye$ensureFbo(
+        int fbo,
+        int newTexId,
+        int cachedTexId
+    ) {
+        if (fbo != 0 && newTexId == cachedTexId) {
+            return fbo;
+        }
+        if (fbo != 0) {
+            GL30.glDeleteFramebuffers(fbo);
+        }
+        fbo = GL30.glGenFramebuffers();
         GL30.glBindFramebuffer(GL30.GL_FRAMEBUFFER, fbo);
         GL30.glFramebufferTexture2D(
             GL30.GL_FRAMEBUFFER,
             GL30.GL_COLOR_ATTACHMENT0,
             GL11.GL_TEXTURE_2D,
-            textureId,
+            newTexId,
             0
         );
         return fbo;
     }
 
+    /** Get GL texture ID via cached reflection (per-class method cache). */
     @Unique
-    private int beeeye$getTextureId(GpuTexture texture) {
+    private static int beeeye$getTextureId(GpuTexture texture) {
         if (texture == null) return -1;
         try {
-            if (texture.getClass().getName().contains("Validation")) {
-                java.lang.reflect.Method unwrap = texture
-                    .getClass()
-                    .getMethod("getRealTexture");
-                texture = (GpuTexture) unwrap.invoke(texture);
+            // Initialize unwrap method cache once
+            if (!beeeye$reflectionInitialized) {
+                beeeye$reflectionInitialized = true;
+                try {
+                    if (texture.getClass().getName().contains("Validation")) {
+                        beeeye$unwrapMethod = texture
+                            .getClass()
+                            .getMethod("getRealTexture");
+                    }
+                } catch (Exception ignored) {}
             }
-            java.lang.reflect.Method method = texture
-                .getClass()
-                .getMethod("glId");
-            return (int) method.invoke(texture);
+
+            // Unwrap validation texture if needed
+            GpuTexture realTexture = texture;
+            if (
+                beeeye$unwrapMethod != null &&
+                texture.getClass().getName().contains("Validation")
+            ) {
+                realTexture = (GpuTexture) beeeye$unwrapMethod.invoke(texture);
+            }
+
+            // Get glId method from per-class cache
+            Class<?> textureClass = realTexture.getClass();
+            Method glIdMethod = beeeye$glIdMethodCache.computeIfAbsent(
+                textureClass,
+                cls -> {
+                    try {
+                        return cls.getMethod("glId");
+                    } catch (NoSuchMethodException e) {
+                        return null;
+                    }
+                }
+            );
+
+            if (glIdMethod == null) {
+                if (!beeeye$reflectionErrorLogged) {
+                    Beeeye.LOGGER.warn(
+                        "No glId method found for texture class: {}",
+                        textureClass.getName()
+                    );
+                    beeeye$reflectionErrorLogged = true;
+                }
+                return -1;
+            }
+
+            return (int) glIdMethod.invoke(realTexture);
         } catch (Exception e) {
+            if (!beeeye$reflectionErrorLogged) {
+                Beeeye.LOGGER.warn(
+                    "Failed to get texture ID via reflection",
+                    e
+                );
+                beeeye$reflectionErrorLogged = true;
+            }
             return -1;
         }
     }

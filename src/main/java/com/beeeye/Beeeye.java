@@ -37,6 +37,7 @@ public class Beeeye {
     }
 
     private void onRegisterKeyMappings(RegisterKeyMappingsEvent event) {
+        event.registerCategory(BeeeyeKeyBindings.CATEGORY);
         event.register(BeeeyeKeyBindings.TOGGLE_STEREO);
         LOGGER.info("Beeeye keybindings registered");
     }
@@ -62,6 +63,7 @@ public class Beeeye {
             // Clean up FBOs when disabled
             if (!stereoEnabled) {
                 StereoRenderer.cleanup();
+                StereoRenderer.cleanupGlFbos();
             }
         }
     }
