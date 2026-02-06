@@ -1,0 +1,22 @@
+# Gradle
+.gradle/
+build/
+bin/
+
+# IDE
+.idea/
+*.iml
+.eclipse/
+.settings/
+.classpath
+.project
+*.launch
+
+# Runtime
+run/
+
+researc/src
+
+# OS
+.DS_Store
+Thumbs.db
