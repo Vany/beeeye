@@ -1,6 +1,7 @@
 package com.beeeye.mixin;
 
 import com.beeeye.Beeeye;
+import com.beeeye.HeadTracker;
 import com.beeeye.StereoRenderer;
 import net.minecraft.client.Camera;
 import net.minecraft.world.entity.Entity;
@@ -26,6 +27,15 @@ public abstract class MixinCamera {
         float horizontalOffset
     );
 
+    @Shadow
+    protected abstract void setRotation(float yaw, float pitch);
+
+    @Shadow
+    private float xRot;
+
+    @Shadow
+    private float yRot;
+
     @Inject(method = "setup", at = @At("TAIL"))
     private void beeeye$applyEyeOffset(
         Level level,
@@ -35,6 +45,16 @@ public abstract class MixinCamera {
         float partialTick,
         CallbackInfo ci
     ) {
+        // Head tracking: only in stereo mode, single snapshot — no tearing
+        if (Beeeye.isStereoEnabled() && HeadTracker.isActive()) {
+            HeadTracker.Quat delta = HeadTracker.getDelta();
+            setRotation(
+                yRot + delta.toYaw(),
+                Math.clamp(xRot + delta.toPitch(), -90f, 90f)
+            );
+        }
+
+        // Stereo eye offset
         if (
             !Beeeye.isStereoEnabled() || !StereoRenderer.isInStereoPass()
         ) return;

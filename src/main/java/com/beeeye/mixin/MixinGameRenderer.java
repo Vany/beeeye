@@ -1,16 +1,27 @@
 package com.beeeye.mixin;
 
 import com.beeeye.Beeeye;
+import com.beeeye.BodyCrosshair;
+import com.beeeye.GlFboCache;
+import com.beeeye.GlFboCache.Slot;
+import com.beeeye.GlTextureUtil;
+import com.beeeye.HeadTracker;
 import com.beeeye.StereoRenderer;
 import com.beeeye.StereoRenderer.Eye;
+import com.beeeye.StereoRenderer.RenderPhase;
 import com.mojang.blaze3d.pipeline.RenderTarget;
-import com.mojang.blaze3d.textures.GpuTexture;
-import java.lang.reflect.Method;
 import net.minecraft.client.Camera;
 import net.minecraft.client.DeltaTracker;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.GameRenderer;
 import net.minecraft.client.renderer.GlobalSettingsUniform;
+import net.minecraft.world.entity.EntitySelector;
+import net.minecraft.world.entity.projectile.ProjectileUtil;
+import net.minecraft.world.level.ClipContext;
+import net.minecraft.world.phys.AABB;
+import net.minecraft.world.phys.EntityHitResult;
+import net.minecraft.world.phys.HitResult;
+import net.minecraft.world.phys.Vec3;
 import org.lwjgl.opengl.GL11;
 import org.lwjgl.opengl.GL30;
 import org.spongepowered.asm.mixin.Final;
@@ -22,7 +33,7 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 /**
- * Stereo rendering: each eye renders to its own half-width FBO,
+ * Stereo rendering pipeline: each eye renders to its own half-width FBO,
  * then composited to main target. HUD alpha-composited onto both eyes.
  */
 @Mixin(GameRenderer.class)
@@ -52,25 +63,10 @@ public abstract class MixinGameRenderer {
     @Unique
     private boolean beeeye$stereoReady = false;
 
-    // Cached reflection methods
-    @Unique
-    private static final java.util.Map<
-        Class<?>,
-        Method
-    > beeeye$glIdMethodCache = new java.util.concurrent.ConcurrentHashMap<>();
+    // =========================================================================
+    // Render pipeline
+    // =========================================================================
 
-    @Unique
-    private static Method beeeye$unwrapMethod = null;
-
-    @Unique
-    private static boolean beeeye$reflectionInitialized = false;
-
-    @Unique
-    private static boolean beeeye$reflectionErrorLogged = false;
-
-    /**
-     * Intercept renderLevel() — render both eyes into separate half-width FBOs.
-     */
     @Inject(method = "renderLevel", at = @At("HEAD"), cancellable = true)
     private void beeeye$onRenderLevel(
         DeltaTracker deltaTracker,
@@ -85,17 +81,14 @@ public abstract class MixinGameRenderer {
             beeeye$renderStereoFrame(deltaTracker);
         } catch (Exception e) {
             Beeeye.LOGGER.error("Stereo render error", e);
+            // Only reset phase on error — normal flow sets HUD_CAPTURE at end
+            StereoRenderer.setPhase(RenderPhase.INACTIVE);
+            StereoRenderer.setCurrentEye(null);
         } finally {
             beeeye$inStereoRender = false;
-            StereoRenderer.setInStereoPass(false);
-            StereoRenderer.setRenderingEye(false);
-            StereoRenderer.setCurrentEye(null);
         }
     }
 
-    /**
-     * After render() completes, HUD is in hudFbo. Composite stereo + HUD to main target.
-     */
     @Inject(method = "render", at = @At("TAIL"))
     private void beeeye$onRenderTail(
         DeltaTracker deltaTracker,
@@ -104,7 +97,7 @@ public abstract class MixinGameRenderer {
     ) {
         if (!beeeye$stereoReady) return;
         beeeye$stereoReady = false;
-        StereoRenderer.setHudPhase(false);
+        StereoRenderer.setPhase(RenderPhase.COMPOSITING);
 
         RenderTarget mainTarget = minecraft.getMainRenderTarget();
         RenderTarget leftFbo = StereoRenderer.getLeftEyeFbo();
@@ -118,175 +111,203 @@ public abstract class MixinGameRenderer {
             compositeRT == null
         ) return;
 
-        int fullWidth = mainTarget.width;
-        int fullHeight = mainTarget.height;
-        int halfWidth = fullWidth / 2;
+        int fullW = mainTarget.width,
+            fullH = mainTarget.height,
+            halfW = fullW / 2;
 
-        // Get texture IDs and ensure cached FBOs are valid
-        int mainTexId = beeeye$getTextureId(mainTarget.getColorTexture());
-        int leftTexId = beeeye$getTextureId(leftFbo.getColorTexture());
-        int rightTexId = beeeye$getTextureId(rightFbo.getColorTexture());
-        int hudTexId = beeeye$getTextureId(hudFbo.getColorTexture());
-        int compositeTexId = beeeye$getTextureId(compositeRT.getColorTexture());
+        // Resolve GL texture IDs via reflection utility
+        int mainTex = GlTextureUtil.textureId(mainTarget.getColorTexture());
+        int leftTex = GlTextureUtil.textureId(leftFbo.getColorTexture());
+        int rightTex = GlTextureUtil.textureId(rightFbo.getColorTexture());
+        int hudTex = GlTextureUtil.textureId(hudFbo.getColorTexture());
+        int compositeTex = GlTextureUtil.textureId(
+            compositeRT.getColorTexture()
+        );
         if (
-            mainTexId <= 0 ||
-            leftTexId <= 0 ||
-            rightTexId <= 0 ||
-            hudTexId <= 0 ||
-            compositeTexId <= 0
+            mainTex <= 0 ||
+            leftTex <= 0 ||
+            rightTex <= 0 ||
+            hudTex <= 0 ||
+            compositeTex <= 0
         ) return;
 
-        // Update cached FBOs if textures changed
-        StereoRenderer.setMainGlFbo(
-            beeeye$ensureFbo(
-                StereoRenderer.getMainGlFbo(),
-                mainTexId,
-                StereoRenderer.getCachedMainTex()
-            )
-        );
-        StereoRenderer.setLeftGlFbo(
-            beeeye$ensureFbo(
-                StereoRenderer.getLeftGlFbo(),
-                leftTexId,
-                StereoRenderer.getCachedLeftTex()
-            )
-        );
-        StereoRenderer.setRightGlFbo(
-            beeeye$ensureFbo(
-                StereoRenderer.getRightGlFbo(),
-                rightTexId,
-                StereoRenderer.getCachedRightTex()
-            )
-        );
-        StereoRenderer.setHudGlFbo(
-            beeeye$ensureFbo(
-                StereoRenderer.getHudGlFbo(),
-                hudTexId,
-                StereoRenderer.getCachedHudTex()
-            )
-        );
-        StereoRenderer.setCompositeGlFbo(
-            beeeye$ensureFbo(
-                StereoRenderer.getCompositeGlFbo(),
-                compositeTexId,
-                StereoRenderer.getCachedCompositeTex()
-            )
-        );
-        StereoRenderer.setCachedMainTex(mainTexId);
-        StereoRenderer.setCachedLeftTex(leftTexId);
-        StereoRenderer.setCachedRightTex(rightTexId);
-        StereoRenderer.setCachedHudTex(hudTexId);
-        StereoRenderer.setCachedCompositeTex(compositeTexId);
+        GlFboCache cache = StereoRenderer.getGlFboCache();
+        int mainGl = cache.fbo(Slot.MAIN, mainTex);
+        int leftGl = cache.fbo(Slot.LEFT, leftTex);
+        int rightGl = cache.fbo(Slot.RIGHT, rightTex);
+        int hudGl = cache.fbo(Slot.HUD, hudTex);
+        int compositeGl = cache.fbo(Slot.COMPOSITE, compositeTex);
 
-        // Blit eye FBOs → main target halves
-        GL30.glBindFramebuffer(
-            GL30.GL_READ_FRAMEBUFFER,
-            StereoRenderer.getLeftGlFbo()
-        );
-        GL30.glBindFramebuffer(
-            GL30.GL_DRAW_FRAMEBUFFER,
-            StereoRenderer.getMainGlFbo()
-        );
-        GL30.glBlitFramebuffer(
+        // Eyes -> main target halves
+        beeeye$blit(leftGl, mainGl, 0, 0, halfW, fullH, 0, 0, halfW, fullH);
+        beeeye$blit(
+            rightGl,
+            mainGl,
             0,
             0,
-            halfWidth,
-            fullHeight,
+            halfW,
+            fullH,
+            halfW,
             0,
-            0,
-            halfWidth,
-            fullHeight,
-            GL11.GL_COLOR_BUFFER_BIT,
-            GL11.GL_NEAREST
+            fullW,
+            fullH
         );
 
-        GL30.glBindFramebuffer(
-            GL30.GL_READ_FRAMEBUFFER,
-            StereoRenderer.getRightGlFbo()
-        );
-        GL30.glBlitFramebuffer(
-            0,
-            0,
-            halfWidth,
-            fullHeight,
-            halfWidth,
-            0,
-            fullWidth,
-            fullHeight,
-            GL11.GL_COLOR_BUFFER_BIT,
-            GL11.GL_NEAREST
-        );
-
-        // Copy hudFbo to both halves of composite
+        // HUD -> both halves of composite buffer
         StereoRenderer.clearFbo(compositeRT);
-        GL30.glBindFramebuffer(
-            GL30.GL_READ_FRAMEBUFFER,
-            StereoRenderer.getHudGlFbo()
-        );
-        GL30.glBindFramebuffer(
-            GL30.GL_DRAW_FRAMEBUFFER,
-            StereoRenderer.getCompositeGlFbo()
-        );
-        GL30.glBlitFramebuffer(
+        beeeye$blit(hudGl, compositeGl, 0, 0, halfW, fullH, 0, 0, halfW, fullH);
+        beeeye$blit(
+            hudGl,
+            compositeGl,
             0,
             0,
-            halfWidth,
-            fullHeight,
+            halfW,
+            fullH,
+            halfW,
             0,
-            0,
-            halfWidth,
-            fullHeight,
-            GL11.GL_COLOR_BUFFER_BIT,
-            GL11.GL_NEAREST
-        );
-        GL30.glBlitFramebuffer(
-            0,
-            0,
-            halfWidth,
-            fullHeight,
-            halfWidth,
-            0,
-            fullWidth,
-            fullHeight,
-            GL11.GL_COLOR_BUFFER_BIT,
-            GL11.GL_NEAREST
+            fullW,
+            fullH
         );
 
+        // Alpha-blend composite (HUD) onto main target
         GL30.glBindFramebuffer(GL30.GL_FRAMEBUFFER, 0);
         compositeRT.blitAndBlendToTexture(mainTarget.getColorTextureView());
+
+        // Body crosshair overlay
+        if (HeadTracker.isActive()) {
+            BodyCrosshair.draw(mainGl, fullW, fullH);
+        }
+
+        StereoRenderer.setPhase(RenderPhase.INACTIVE);
     }
+
+    // =========================================================================
+    // Stereo frame orchestration
+    // =========================================================================
 
     @Unique
     private void beeeye$renderStereoFrame(DeltaTracker deltaTracker) {
         RenderTarget mainTarget = minecraft.getMainRenderTarget();
         StereoRenderer.ensureFramebuffers(mainTarget.width, mainTarget.height);
-        StereoRenderer.setInStereoPass(true);
 
-        // Left eye
-        StereoRenderer.setCurrentEye(Eye.LEFT);
-        StereoRenderer.setRenderingEye(true);
-        StereoRenderer.clearFbo(StereoRenderer.getLeftEyeFbo());
-        updateCamera(deltaTracker);
-        beeeye$refreshGlobalUniforms(deltaTracker);
-        renderLevel(deltaTracker);
-        StereoRenderer.setRenderingEye(false);
+        if (
+            StereoRenderer.isDynamicConvergenceEnabled() &&
+            minecraft.player != null
+        ) {
+            Vec3 eyePos = minecraft.player.getEyePosition(1.0f);
+            HitResult hit = minecraft.hitResult;
+            float targetDistance;
+            if (hit != null && hit.getType() != HitResult.Type.MISS) {
+                targetDistance = (float) hit.getLocation().distanceTo(eyePos);
+            } else {
+                targetDistance = beeeye$pickEntityViaEyeRays(eyePos);
+            }
+            StereoRenderer.updateDynamicConvergence(targetDistance);
+        }
 
-        // Right eye
-        StereoRenderer.setCurrentEye(Eye.RIGHT);
-        StereoRenderer.setRenderingEye(true);
-        StereoRenderer.clearFbo(StereoRenderer.getRightEyeFbo());
-        updateCamera(deltaTracker);
-        beeeye$refreshGlobalUniforms(deltaTracker);
-        renderLevel(deltaTracker);
-        StereoRenderer.setRenderingEye(false);
+        for (Eye eye : Eye.values()) {
+            StereoRenderer.setCurrentEye(eye);
+            StereoRenderer.setPhase(RenderPhase.EYE_RENDER);
+            StereoRenderer.clearFbo(StereoRenderer.getCurrentEyeFbo());
+            updateCamera(deltaTracker);
+            beeeye$refreshGlobalUniforms(deltaTracker);
+            renderLevel(deltaTracker);
+        }
 
         StereoRenderer.setCurrentEye(null);
-        StereoRenderer.setInStereoPass(false);
-
-        // Prepare HUD phase
         StereoRenderer.clearFbo(StereoRenderer.getHudFbo());
         beeeye$stereoReady = true;
-        StereoRenderer.setHudPhase(true);
+        StereoRenderer.setPhase(RenderPhase.HUD_CAPTURE);
+    }
+
+    // =========================================================================
+    // Dynamic convergence — eye-ray picking
+    // =========================================================================
+
+    @Unique
+    private float beeeye$pickEntityViaEyeRays(Vec3 eyePos) {
+        float staticConv = StereoRenderer.getStaticConvergence();
+        if (
+            minecraft.player == null || minecraft.level == null
+        ) return staticConv;
+
+        Vec3 forward = new Vec3(mainCamera.forwardVector());
+        Vec3 left = new Vec3(mainCamera.leftVector());
+        float halfIPD = StereoRenderer.getIPD() / 2.0f;
+        float convDist = StereoRenderer.getConvergence();
+        Vec3 convergencePoint = eyePos.add(forward.scale(convDist));
+
+        Vec3 leftEyePos = eyePos.add(left.scale(halfIPD));
+        Vec3 rightEyePos = eyePos.subtract(left.scale(halfIPD));
+
+        double bestDistSq = Double.MAX_VALUE;
+
+        for (Vec3 eyeOrigin : new Vec3[] { leftEyePos, rightEyePos }) {
+            HitResult blockHit = minecraft.level.clip(
+                new ClipContext(
+                    eyeOrigin,
+                    convergencePoint,
+                    ClipContext.Block.OUTLINE,
+                    ClipContext.Fluid.NONE,
+                    minecraft.player
+                )
+            );
+            if (blockHit.getType() != HitResult.Type.MISS) {
+                double d = blockHit.getLocation().distanceToSqr(eyePos);
+                if (d < bestDistSq) bestDistSq = d;
+            }
+
+            AABB searchBox = new AABB(eyeOrigin, convergencePoint).inflate(1.0);
+            EntityHitResult entityHit = ProjectileUtil.getEntityHitResult(
+                minecraft.player,
+                eyeOrigin,
+                convergencePoint,
+                searchBox,
+                EntitySelector.CAN_BE_PICKED,
+                convDist * convDist + 4.0
+            );
+            if (entityHit != null) {
+                double d = entityHit.getLocation().distanceToSqr(eyePos);
+                if (d < bestDistSq) bestDistSq = d;
+            }
+        }
+
+        return bestDistSq < Double.MAX_VALUE
+            ? (float) Math.sqrt(bestDistSq)
+            : staticConv;
+    }
+
+    // =========================================================================
+    // GL helpers
+    // =========================================================================
+
+    @Unique
+    private static void beeeye$blit(
+        int readFbo,
+        int drawFbo,
+        int sx0,
+        int sy0,
+        int sx1,
+        int sy1,
+        int dx0,
+        int dy0,
+        int dx1,
+        int dy1
+    ) {
+        GL30.glBindFramebuffer(GL30.GL_READ_FRAMEBUFFER, readFbo);
+        GL30.glBindFramebuffer(GL30.GL_DRAW_FRAMEBUFFER, drawFbo);
+        GL30.glBlitFramebuffer(
+            sx0,
+            sy0,
+            sx1,
+            sy1,
+            dx0,
+            dy0,
+            dx1,
+            dy1,
+            GL11.GL_COLOR_BUFFER_BIT,
+            GL11.GL_NEAREST
+        );
     }
 
     @Unique
@@ -302,93 +323,5 @@ public abstract class MixinGameRenderer {
             minecraft.options.textureFiltering().get() ==
                 net.minecraft.client.TextureFilteringMethod.ANISOTROPIC
         );
-    }
-
-    /** Ensure FBO exists and points to correct texture; recreate if texture changed. */
-    @Unique
-    private static int beeeye$ensureFbo(
-        int fbo,
-        int newTexId,
-        int cachedTexId
-    ) {
-        if (fbo != 0 && newTexId == cachedTexId) {
-            return fbo;
-        }
-        if (fbo != 0) {
-            GL30.glDeleteFramebuffers(fbo);
-        }
-        fbo = GL30.glGenFramebuffers();
-        GL30.glBindFramebuffer(GL30.GL_FRAMEBUFFER, fbo);
-        GL30.glFramebufferTexture2D(
-            GL30.GL_FRAMEBUFFER,
-            GL30.GL_COLOR_ATTACHMENT0,
-            GL11.GL_TEXTURE_2D,
-            newTexId,
-            0
-        );
-        return fbo;
-    }
-
-    /** Get GL texture ID via cached reflection (per-class method cache). */
-    @Unique
-    private static int beeeye$getTextureId(GpuTexture texture) {
-        if (texture == null) return -1;
-        try {
-            // Initialize unwrap method cache once
-            if (!beeeye$reflectionInitialized) {
-                beeeye$reflectionInitialized = true;
-                try {
-                    if (texture.getClass().getName().contains("Validation")) {
-                        beeeye$unwrapMethod = texture
-                            .getClass()
-                            .getMethod("getRealTexture");
-                    }
-                } catch (Exception ignored) {}
-            }
-
-            // Unwrap validation texture if needed
-            GpuTexture realTexture = texture;
-            if (
-                beeeye$unwrapMethod != null &&
-                texture.getClass().getName().contains("Validation")
-            ) {
-                realTexture = (GpuTexture) beeeye$unwrapMethod.invoke(texture);
-            }
-
-            // Get glId method from per-class cache
-            Class<?> textureClass = realTexture.getClass();
-            Method glIdMethod = beeeye$glIdMethodCache.computeIfAbsent(
-                textureClass,
-                cls -> {
-                    try {
-                        return cls.getMethod("glId");
-                    } catch (NoSuchMethodException e) {
-                        return null;
-                    }
-                }
-            );
-
-            if (glIdMethod == null) {
-                if (!beeeye$reflectionErrorLogged) {
-                    Beeeye.LOGGER.warn(
-                        "No glId method found for texture class: {}",
-                        textureClass.getName()
-                    );
-                    beeeye$reflectionErrorLogged = true;
-                }
-                return -1;
-            }
-
-            return (int) glIdMethod.invoke(realTexture);
-        } catch (Exception e) {
-            if (!beeeye$reflectionErrorLogged) {
-                Beeeye.LOGGER.warn(
-                    "Failed to get texture ID via reflection",
-                    e
-                );
-                beeeye$reflectionErrorLogged = true;
-            }
-            return -1;
-        }
     }
 }

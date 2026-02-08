@@ -5,20 +5,16 @@ import com.mojang.blaze3d.pipeline.TextureTarget;
 import com.mojang.blaze3d.systems.CommandEncoder;
 import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.textures.GpuTexture;
-import org.lwjgl.opengl.GL30;
 
 /**
- * Stereo 3D renderer — state management and FBO lifecycle.
+ * Stereo 3D renderer — state machine and FBO lifecycle.
  *
- * Rendering phases (controlled by MixinGameRenderer):
- *   1. Eye rendering (renderingEye=true): each eye renders to its own
- *      half-width FBO via getMainRenderTarget() redirect + width faking.
- *      Off-axis projection (MixinProjectionMatrix) creates per-eye parallax.
- *   2. HUD phase (hudPhase=true): Minecraft + mods draw HUD into half-width
- *      hudFbo. Width faking active so HUD layout uses eye dimensions.
- *   3. Compositing (render TAIL): eye FBOs → main target halves,
- *      then copy hudFbo identically onto both halves via alpha blend.
- *      Same pixels → same crosshair position on both eyes.
+ * Render phases (driven by MixinGameRenderer):
+ *   {@link RenderPhase#EYE_RENDER} — each eye renders to half-width FBO.
+ *   {@link RenderPhase#HUD_CAPTURE} — HUD draws into half-width hudFbo.
+ *   {@link RenderPhase#COMPOSITING} — eye FBOs blitted to main target halves,
+ *       HUD alpha-composited onto both halves identically.
+ *   {@link RenderPhase#INACTIVE} — stereo pipeline idle.
  */
 public class StereoRenderer {
 
@@ -33,14 +29,24 @@ public class StereoRenderer {
         }
     }
 
-    // --- Constants ---
-    private static final float DEFAULT_CONVERGENCE = 5.0f;
+    /** Render pipeline phase — replaces fragile independent boolean flags. */
+    public enum RenderPhase {
+        INACTIVE,
+        EYE_RENDER,
+        HUD_CAPTURE,
+        COMPOSITING,
+    }
 
-    // --- State flags ---
+    private static final float MIN_CONVERGENCE = 1.0f;
+    private static final float MAX_CONVERGENCE = 50.0f;
+
+    // --- State ---
+    private static volatile RenderPhase phase = RenderPhase.INACTIVE;
     private static Eye currentEye = null;
-    private static boolean inStereoPass = false;
-    private static boolean renderingEye = false;
-    private static boolean hudPhase = false;
+
+    // --- Dynamic convergence ---
+    private static float dynamicConvergence =
+        (float) BeeeyeConfig.DEFAULT_CONVERGENCE;
 
     // --- FBOs ---
     private static RenderTarget leftEyeFbo = null;
@@ -48,24 +54,40 @@ public class StereoRenderer {
     private static RenderTarget hudFbo = null;
     private static RenderTarget compositeTarget = null;
 
-    // --- Cached dimensions ---
+    // --- Cached dimensions (true physical size, not faked) ---
     private static int lastWidth = 0;
     private static int lastHeight = 0;
 
-    // --- Cached GL FBOs for compositing (managed by MixinGameRenderer, cleaned here) ---
-    private static int mainGlFbo = 0;
-    private static int leftGlFbo = 0;
-    private static int rightGlFbo = 0;
-    private static int hudGlFbo = 0;
-    private static int compositeGlFbo = 0;
-    private static int cachedMainTex = 0;
-    private static int cachedLeftTex = 0;
-    private static int cachedRightTex = 0;
-    private static int cachedHudTex = 0;
-    private static int cachedCompositeTex = 0;
+    // --- GL FBO cache for compositing ---
+    private static final GlFboCache glFboCache = new GlFboCache();
 
     // =========================================================================
-    // State accessors
+    // Phase state machine
+    // =========================================================================
+
+    public static RenderPhase getPhase() {
+        return phase;
+    }
+
+    public static void setPhase(RenderPhase p) {
+        phase = p;
+    }
+
+    /** Backward-compatible queries — derived from single phase enum. */
+    public static boolean isInStereoPass() {
+        return phase == RenderPhase.EYE_RENDER;
+    }
+
+    public static boolean isRenderingEye() {
+        return phase == RenderPhase.EYE_RENDER;
+    }
+
+    public static boolean isHudPhase() {
+        return phase == RenderPhase.HUD_CAPTURE;
+    }
+
+    // =========================================================================
+    // Eye state
     // =========================================================================
 
     public static Eye getCurrentEye() {
@@ -74,30 +96,6 @@ public class StereoRenderer {
 
     public static void setCurrentEye(Eye eye) {
         currentEye = eye;
-    }
-
-    public static boolean isInStereoPass() {
-        return inStereoPass;
-    }
-
-    public static void setInStereoPass(boolean value) {
-        inStereoPass = value;
-    }
-
-    public static boolean isRenderingEye() {
-        return renderingEye;
-    }
-
-    public static void setRenderingEye(boolean value) {
-        renderingEye = value;
-    }
-
-    public static boolean isHudPhase() {
-        return hudPhase;
-    }
-
-    public static void setHudPhase(boolean value) {
-        hudPhase = value;
     }
 
     // =========================================================================
@@ -120,49 +118,92 @@ public class StereoRenderer {
         return compositeTarget;
     }
 
+    public static GlFboCache getGlFboCache() {
+        return glFboCache;
+    }
+
     /** Current eye's FBO — used by MixinMinecraft to redirect getMainRenderTarget(). */
     public static RenderTarget getCurrentEyeFbo() {
-        if (currentEye == null) return null;
-        return currentEye == Eye.LEFT ? leftEyeFbo : rightEyeFbo;
+        return currentEye == null
+            ? null
+            : currentEye == Eye.LEFT
+                ? leftEyeFbo
+                : rightEyeFbo;
+    }
+
+    /** True physical framebuffer width (not faked by MixinWindow). */
+    public static int getFullWidth() {
+        return lastWidth;
+    }
+
+    public static int getFullHeight() {
+        return lastHeight;
     }
 
     // =========================================================================
     // Stereo parameters
     // =========================================================================
 
-    /** Get IPD from config (with fallback if config not loaded). */
     public static float getIPD() {
-        try {
-            return BeeeyeConfig.EYE_DISTANCE.get().floatValue();
-        } catch (Exception e) {
-            return 0.25f; // Default fallback
-        }
+        return BeeeyeConfig.get(
+            BeeeyeConfig.EYE_DISTANCE,
+            BeeeyeConfig.DEFAULT_EYE_DISTANCE
+        ).floatValue();
     }
 
-    /** Get convergence distance from config (with fallback if config not loaded). */
+    /** Convergence distance — dynamic (raycast-driven) or static from config. */
     public static float getConvergence() {
-        try {
-            return BeeeyeConfig.CONVERGENCE.get().floatValue();
-        } catch (Exception e) {
-            return DEFAULT_CONVERGENCE; // Default fallback
-        }
+        return isDynamicConvergenceEnabled()
+            ? dynamicConvergence
+            : getStaticConvergence();
+    }
+
+    /** Static convergence from config (fallback for sky/no-hit). */
+    public static float getStaticConvergence() {
+        return BeeeyeConfig.get(
+            BeeeyeConfig.CONVERGENCE,
+            BeeeyeConfig.DEFAULT_CONVERGENCE
+        ).floatValue();
+    }
+
+    public static boolean isDynamicConvergenceEnabled() {
+        return BeeeyeConfig.get(BeeeyeConfig.DYNAMIC_CONVERGENCE, false);
+    }
+
+    /**
+     * Smoothly update dynamic convergence toward target distance.
+     * Speed in ticks → exponential lerp: 1 - exp(-2.2 / speed).
+     */
+    public static void updateDynamicConvergence(float targetDistance) {
+        float clamped = Math.clamp(
+            targetDistance,
+            MIN_CONVERGENCE,
+            MAX_CONVERGENCE
+        );
+        int speed = BeeeyeConfig.get(
+            BeeeyeConfig.CONVERGENCE_SPEED,
+            BeeeyeConfig.DEFAULT_CONVERGENCE_SPEED
+        );
+        float smoothing = (float) (1.0 - Math.exp(-2.2 / speed));
+        dynamicConvergence += (clamped - dynamicConvergence) * smoothing;
+    }
+
+    public static float getDynamicConvergence() {
+        return dynamicConvergence;
     }
 
     /**
      * Projection matrix m20 offset for asymmetric frustum stereo.
-     * Frustum shifts left/right per eye; objects at convergence distance have zero parallax.
-     *
-     * @param m00 the projection matrix m00 element (focal length / aspect)
+     * Objects at convergence distance have zero parallax.
      */
     public static float getProjectionOffset(float m00) {
         if (currentEye == null) return 0;
-        float halfIPD = getIPD() / 2.0f;
-        return -(currentEye.sign * halfIPD * m00) / getConvergence();
+        return (
+            -(((currentEye.sign * getIPD()) / 2.0f) * m00) / getConvergence()
+        );
     }
 
-    /**
-     * Camera X offset: move camera ±IPD/2 along local X axis per eye.
-     */
+    /** Camera X offset: +/- IPD/2 along local X axis per eye. */
     public static float getEyeOffset() {
         if (currentEye == null) return 0;
         return currentEye.sign * (getIPD() / 2.0f);
@@ -174,17 +215,14 @@ public class StereoRenderer {
 
     /**
      * Create/recreate FBOs if dimensions changed.
-     * Eye FBOs + HUD FBO: half width, with depth.
-     * Composite: full width, no depth (alpha blend intermediary).
+     * Eye + HUD FBOs: half width, with depth. Composite: full width, no depth.
      */
     public static void ensureFramebuffers(int fullWidth, int fullHeight) {
         if (
             leftEyeFbo != null &&
             lastWidth == fullWidth &&
             lastHeight == fullHeight
-        ) {
-            return;
-        }
+        ) return;
 
         int halfWidth = fullWidth / 2;
         Beeeye.LOGGER.info(
@@ -236,136 +274,20 @@ public class StereoRenderer {
     }
 
     public static void cleanup() {
-        if (leftEyeFbo != null) {
-            leftEyeFbo.destroyBuffers();
-            leftEyeFbo = null;
-        }
-        if (rightEyeFbo != null) {
-            rightEyeFbo.destroyBuffers();
-            rightEyeFbo = null;
-        }
-        if (hudFbo != null) {
-            hudFbo.destroyBuffers();
-            hudFbo = null;
-        }
-        if (compositeTarget != null) {
-            compositeTarget.destroyBuffers();
-            compositeTarget = null;
-        }
+        destroyFbo(leftEyeFbo);
+        leftEyeFbo = null;
+        destroyFbo(rightEyeFbo);
+        rightEyeFbo = null;
+        destroyFbo(hudFbo);
+        hudFbo = null;
+        destroyFbo(compositeTarget);
+        compositeTarget = null;
+        glFboCache.cleanup();
         lastWidth = 0;
         lastHeight = 0;
     }
 
-    // =========================================================================
-    // GL FBO management (for MixinGameRenderer compositing)
-    // =========================================================================
-
-    public static int getMainGlFbo() {
-        return mainGlFbo;
-    }
-
-    public static void setMainGlFbo(int fbo) {
-        mainGlFbo = fbo;
-    }
-
-    public static int getLeftGlFbo() {
-        return leftGlFbo;
-    }
-
-    public static void setLeftGlFbo(int fbo) {
-        leftGlFbo = fbo;
-    }
-
-    public static int getRightGlFbo() {
-        return rightGlFbo;
-    }
-
-    public static void setRightGlFbo(int fbo) {
-        rightGlFbo = fbo;
-    }
-
-    public static int getHudGlFbo() {
-        return hudGlFbo;
-    }
-
-    public static void setHudGlFbo(int fbo) {
-        hudGlFbo = fbo;
-    }
-
-    public static int getCompositeGlFbo() {
-        return compositeGlFbo;
-    }
-
-    public static void setCompositeGlFbo(int fbo) {
-        compositeGlFbo = fbo;
-    }
-
-    public static int getCachedMainTex() {
-        return cachedMainTex;
-    }
-
-    public static void setCachedMainTex(int tex) {
-        cachedMainTex = tex;
-    }
-
-    public static int getCachedLeftTex() {
-        return cachedLeftTex;
-    }
-
-    public static void setCachedLeftTex(int tex) {
-        cachedLeftTex = tex;
-    }
-
-    public static int getCachedRightTex() {
-        return cachedRightTex;
-    }
-
-    public static void setCachedRightTex(int tex) {
-        cachedRightTex = tex;
-    }
-
-    public static int getCachedHudTex() {
-        return cachedHudTex;
-    }
-
-    public static void setCachedHudTex(int tex) {
-        cachedHudTex = tex;
-    }
-
-    public static int getCachedCompositeTex() {
-        return cachedCompositeTex;
-    }
-
-    public static void setCachedCompositeTex(int tex) {
-        cachedCompositeTex = tex;
-    }
-
-    /** Cleanup cached GL FBOs used for compositing. */
-    public static void cleanupGlFbos() {
-        if (mainGlFbo != 0) {
-            GL30.glDeleteFramebuffers(mainGlFbo);
-            mainGlFbo = 0;
-        }
-        if (leftGlFbo != 0) {
-            GL30.glDeleteFramebuffers(leftGlFbo);
-            leftGlFbo = 0;
-        }
-        if (rightGlFbo != 0) {
-            GL30.glDeleteFramebuffers(rightGlFbo);
-            rightGlFbo = 0;
-        }
-        if (hudGlFbo != 0) {
-            GL30.glDeleteFramebuffers(hudGlFbo);
-            hudGlFbo = 0;
-        }
-        if (compositeGlFbo != 0) {
-            GL30.glDeleteFramebuffers(compositeGlFbo);
-            compositeGlFbo = 0;
-        }
-        cachedMainTex = 0;
-        cachedLeftTex = 0;
-        cachedRightTex = 0;
-        cachedHudTex = 0;
-        cachedCompositeTex = 0;
+    private static void destroyFbo(RenderTarget fbo) {
+        if (fbo != null) fbo.destroyBuffers();
     }
 }

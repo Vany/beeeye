@@ -7,6 +7,7 @@ import net.neoforged.fml.ModContainer;
 import net.neoforged.fml.common.Mod;
 import net.neoforged.fml.config.ModConfig;
 import net.neoforged.fml.event.lifecycle.FMLClientSetupEvent;
+import net.neoforged.neoforge.client.event.ClientPlayerNetworkEvent;
 import net.neoforged.neoforge.client.event.ClientTickEvent;
 import net.neoforged.neoforge.client.event.RegisterClientCommandsEvent;
 import net.neoforged.neoforge.client.event.RegisterKeyMappingsEvent;
@@ -20,7 +21,8 @@ public class Beeeye {
     public static final String MOD_ID = "beeeye";
     public static final Logger LOGGER = LoggerFactory.getLogger(MOD_ID);
 
-    private static boolean stereoEnabled = false;
+    private static volatile boolean stereoEnabled = false;
+    private static final OscListener oscListener = new OscListener();
 
     public Beeeye(IEventBus modEventBus, ModContainer modContainer) {
         LOGGER.info("Beeeye initializing...");
@@ -32,6 +34,17 @@ public class Beeeye {
 
         NeoForge.EVENT_BUS.addListener(this::onClientTick);
         NeoForge.EVENT_BUS.addListener(this::onRegisterClientCommands);
+        NeoForge.EVENT_BUS.addListener(this::onLoggingIn);
+        NeoForge.EVENT_BUS.addListener(this::onLoggingOut);
+
+        int port = BeeeyeConfig.get(
+            BeeeyeConfig.OSC_PORT,
+            BeeeyeConfig.DEFAULT_OSC_PORT
+        );
+        oscListener.start(port);
+        Runtime.getRuntime().addShutdownHook(
+            new Thread(oscListener::stop, "beeeye-osc-shutdown")
+        );
     }
 
     private void onClientSetup(FMLClientSetupEvent event) {
@@ -67,11 +80,27 @@ public class Beeeye {
                 );
             }
 
-            // Clean up FBOs when disabled
-            if (!stereoEnabled) {
+            if (stereoEnabled) {
+                HeadTracker.calibrate();
+            } else {
                 StereoRenderer.cleanup();
-                StereoRenderer.cleanupGlFbos();
             }
+        }
+    }
+
+    private void onLoggingIn(ClientPlayerNetworkEvent.LoggingIn event) {
+        // Force FBO recreation on world join — viewport may have changed
+        StereoRenderer.cleanup();
+        LOGGER.info(
+            "Joined world, stereo FBOs will be recreated on next frame"
+        );
+    }
+
+    private void onLoggingOut(ClientPlayerNetworkEvent.LoggingOut event) {
+        if (stereoEnabled) {
+            LOGGER.info("Leaving world, disabling stereo");
+            stereoEnabled = false;
+            StereoRenderer.cleanup();
         }
     }
 

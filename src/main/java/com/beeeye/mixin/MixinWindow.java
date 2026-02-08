@@ -1,6 +1,7 @@
 package com.beeeye.mixin;
 
 import com.beeeye.Beeeye;
+import com.beeeye.StereoRenderer;
 import com.mojang.blaze3d.platform.Window;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
@@ -9,9 +10,11 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 /**
- * Fake window width to half when stereo is enabled.
- * All rendering (world, HUD, screens) uses half-width eye FBOs,
- * so all code should see half-width dimensions.
+ * Fake window width to half during stereo rendering phases.
+ * getWidth() only faked during EYE_RENDER/HUD_CAPTURE — not during
+ * resize or compositing, which need the real framebuffer width.
+ * getScreenWidth() and getGuiScaledWidth() faked whenever stereo is enabled
+ * (they affect GUI layout, not render target creation).
  */
 @Mixin(Window.class)
 public class MixinWindow {
@@ -27,7 +30,13 @@ public class MixinWindow {
 
     @Inject(method = "getWidth", at = @At("HEAD"), cancellable = true)
     private void beeeye$fakeWidth(CallbackInfoReturnable<Integer> cir) {
-        if (Beeeye.isStereoEnabled()) {
+        if (!Beeeye.isStereoEnabled()) return;
+        // Only fake during rendering phases — resizeDisplay() needs real width
+        StereoRenderer.RenderPhase phase = StereoRenderer.getPhase();
+        if (
+            phase == StereoRenderer.RenderPhase.EYE_RENDER ||
+            phase == StereoRenderer.RenderPhase.HUD_CAPTURE
+        ) {
             cir.setReturnValue(framebufferWidth / 2);
         }
     }

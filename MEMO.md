@@ -2,7 +2,8 @@
 
 ### Current Implementation: Off-Axis Projection Stereo + HUD Alpha Compositing
 
-**Status**: Working. Config-driven IPD and convergence. HUD alpha composited to both eyes.
+**Status**: v1.0.2. Config-driven IPD and convergence. HUD alpha composited to both eyes.
+Head tracking via OSC with nlerp smoothing and dual dead zone. Stereo mouse on both halves.
 
 #### Stereo Approaches Tried
 
@@ -87,20 +88,53 @@ used for HUD rendering (hudFbo) and alpha compositing (compositeTarget).
 
 | File | Purpose |
 |------|---------|
-| `StereoRenderer.java` | State, FBOs, GL FBO cache, projection offset calc |
+| `StereoRenderer.java` | State, FBOs, GL FBO cache, RenderPhase state machine |
 | `MixinGameRenderer.java` | Stereo render loop, HUD alpha compositing |
 | `MixinProjectionMatrix.java` | Off-axis projection shift on `getProjectionMatrix()` |
-| `MixinCamera.java` | Camera offset (DISABLED in mixins.json - causes chunk freeze) |
+| `MixinCamera.java` | Head tracking application (guarded by stereo enabled) |
 | `MixinMinecraft.java` | Redirects `getMainRenderTarget()` to eye/HUD FBO |
-| `MixinWindow.java` | Fakes width/guiScaledWidth to half when stereo enabled |
-| `MixinMouseHandler.java` | Translates mouse X for right-eye half |
+| `MixinWindow.java` | Fakes width/guiScaledWidth to half (phase-gated) |
+| `MixinMouseHandler.java` | Translates mouse X for both eye halves (xpos + getScaledXPos) |
+| `HeadTracker.java` | Immutable Quat record, nlerp smoothing, anchored dead zone |
+| `OscListener.java` | UDP OSC receiver, buffers quaternion components |
+| `BodyCrosshair.java` | Body direction crosshair via scissor+clear |
+| `GlTextureUtil.java` | ValidationGpuTexture unwrapping via reflection |
+| `GlFboCache.java` | GL FBO management with int[] arrays (zero boxing) |
 | `BeeeyeKeyBindings.java` | Key bindings (`\` backslash toggle stereo) |
-| `BeeeyeConfig.java` | Configuration: eyeDistance, convergence |
+| `BeeeyeConfig.java` | Configuration: eyeDistance, convergence, oscPort, deadzone |
+
+#### Head Tracking
+
+- **OSC protocol**: Receives quaternion rotation from data OSC app
+- **OSC paths**: `/data/faceTracking/face/rotation/{x,y,z,w}` — buffered, pushed on /w
+- **Immutable Quat record**: Atomic reference swap eliminates tearing between OSC and render threads
+- **nlerp smoothing**: Factor 0.4, fast slerp approximation at high sample rates
+- **Anchored dead zone**: Dead zone centered on last stable position, not calibration center
+  - When moving and settling within dead zone → anchor snaps, output frozen
+  - When stationary and breaking out of dead zone → start moving again
+  - Eliminates jitter at any head angle, not just neutral
+- **Calibration**: `HeadTracker.calibrate()` saves current as neutral, resets anchor
+
+#### RenderPhase State Machine
+
+Replaces 4 independent booleans with single enum: `INACTIVE, EYE_RENDER, HUD_CAPTURE, COMPOSITING`
+- `isInStereoPass()` → `phase == EYE_RENDER` (NOT `!= INACTIVE` — that breaks HUD)
+- `isHudPhase()` → `phase == HUD_CAPTURE`
+- Critical: finally block in render loop only resets `beeeye$inStereoRender`, NOT the phase
 
 #### Configuration
 
 - `eyeDistance`: 0.25 blocks (default), range 0.01-1.0 — IPD (inter-pupillary distance)
-- `convergence`: 5.0 blocks (default), range 1.0-50.0 — zero parallax distance
+- `convergence`: 5.0 blocks (default), range 1.0-50.0 — zero parallax distance (fallback for dynamic)
+- `dynamicConvergence`: true (default) — auto-adjust convergence to crosshair target distance
+- `convergenceSpeed`: 4 ticks (default), range 1-40 — time in minecraft ticks to reach new target distance. Replaces old `convergenceSmoothing` lerp factor. Internally converted to per-tick lerp: `1 - exp(-2.2 / speed)` for smooth exponential approach.
+- `oscPort`: 9001 (default), range 1024-65535 — UDP port for OSC head tracking data
+- `headDeadzone`: 2.0 degrees (default), range 0.0-15.0 — angular dead zone for head tracking
+
+#### Config Persistence
+
+All parameters except `enabled` (stereo toggle) are written through to `config/beeeye-client.toml`
+when changed via `/beeeye set` or config UI. Call `SPEC.save()` after `ConfigValue.set()`.
 
 #### OpenGL Constraints
 
@@ -120,5 +154,11 @@ used for HUD rendering (hudFbo) and alpha compositing (compositeTarget).
 - [x] HUD appears on both halves (alpha composited)
 - [x] JourneyMap minimap visible in stereo
 - [x] Inventory/screens work correctly
+- [ ] Dynamic convergence: look at close block → convergence decreases
+- [ ] Dynamic convergence: look at sky → falls back to static config
+- [ ] Eye-ray entity convergence: entity between eyes triggers convergence even when center crosshair misses
 - [ ] Crosshair has convergence offset
-- [ ] No crashes on window resize
+- [x] No crashes on window resize (phase-gated getWidth fix)
+- [x] Stereo disabled on world quit (ClientPlayerNetworkEvent.LoggingOut)
+- [x] Head tracking via OSC with anchored dead zone
+- [x] Mouse works on both eye halves in GUI/crafting
