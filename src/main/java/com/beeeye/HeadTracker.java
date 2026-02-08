@@ -82,8 +82,14 @@ public class HeadTracker {
         }
     }
 
-    private static final long TIMEOUT_MS = 500;
-    private static final float SMOOTHING = 0.4f;
+    /** Consider tracking lost after this silence duration. */
+    private static final long TRACKING_TIMEOUT_MS = 500;
+
+    /** Nlerp blend factor — balances responsiveness vs jitter at ~60Hz OSC rate. */
+    private static final float NLERP_FACTOR = 0.4f;
+
+    /** Milliseconds per Minecraft tick, used for settle time calculation. */
+    private static final long MS_PER_TICK = 50L;
 
     private static float getDeadZone() {
         return BeeeyeConfig.get(
@@ -104,7 +110,7 @@ public class HeadTracker {
     private static Quat anchor = Quat.IDENTITY;
     private static boolean moving = false;
 
-    // Settle detection: head must stay within dead zone for CONVERGENCE_SPEED ticks (×50ms).
+    // Settle detection: head must stay within dead zone for convergenceSpeed × MS_PER_TICK.
     // settleOrigin = position when we first entered the dead zone candidate area.
     // settleStartMs = timestamp when settle candidate started.
     private static Quat settleOrigin = Quat.IDENTITY;
@@ -112,7 +118,7 @@ public class HeadTracker {
 
     /** Push a complete quaternion from OSC listener, with nlerp smoothing. */
     public static void update(Quat q) {
-        current = current.nlerp(q, SMOOTHING);
+        current = current.nlerp(q, NLERP_FACTOR);
         lastUpdateMs = System.currentTimeMillis();
     }
 
@@ -120,7 +126,7 @@ public class HeadTracker {
     public static boolean isActive() {
         return (
             calibrated &&
-            (System.currentTimeMillis() - lastUpdateMs) < TIMEOUT_MS
+            (System.currentTimeMillis() - lastUpdateMs) < TRACKING_TIMEOUT_MS
         );
     }
 
@@ -147,38 +153,31 @@ public class HeadTracker {
         float anchorYaw = Math.abs(anchorDelta.toYaw());
         float anchorPitch = Math.abs(anchorDelta.toPitch());
 
-        // Settle time = convergenceSpeed ticks × 50ms per tick
         long settleMs =
             BeeeyeConfig.get(
                 BeeeyeConfig.CONVERGENCE_SPEED,
                 BeeeyeConfig.DEFAULT_CONVERGENCE_SPEED
             ) *
-            50L;
+            MS_PER_TICK;
 
         if (moving) {
-            // Check if head is near the settle origin (candidate rest point)
             Quat settleDelta = current.mul(settleOrigin.inverse());
             float settleYaw = Math.abs(settleDelta.toYaw());
             float settlePitch = Math.abs(settleDelta.toPitch());
 
             if (settleYaw < dz && settlePitch < dz) {
-                // Still near settle origin — check elapsed time
                 if (System.currentTimeMillis() - settleStartMs >= settleMs) {
-                    // Settled long enough: stop moving, anchor at settle origin
                     moving = false;
                     anchor = settleOrigin;
                     return anchor.mul(neutralInverse);
                 }
             } else {
-                // Moved away from settle origin — reset candidate to current
                 settleOrigin = current;
                 settleStartMs = System.currentTimeMillis();
             }
-            // Still moving: update anchor to track, return live delta
             anchor = current;
             return delta;
         } else {
-            // Stationary — check if we've broken out of anchor dead zone
             if (anchorYaw >= dz || anchorPitch >= dz) {
                 moving = true;
                 anchor = current;
@@ -186,7 +185,6 @@ public class HeadTracker {
                 settleStartMs = System.currentTimeMillis();
                 return delta;
             }
-            // Still within dead zone: return anchor's delta (frozen)
             return anchor.mul(neutralInverse);
         }
     }

@@ -45,8 +45,6 @@ public abstract class MixinMouseHandler {
             x -= halfScreenWidth;
         }
 
-        // Replicate the static getScaledXPos logic: x * guiScaledWidth / screenWidth
-        // guiScaledWidth and screenWidth are already halved by MixinWindow
         cir.setReturnValue(
             (x * window.getGuiScaledWidth()) / window.getScreenWidth()
         );

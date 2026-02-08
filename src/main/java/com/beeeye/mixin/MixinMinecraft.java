@@ -2,6 +2,7 @@ package com.beeeye.mixin;
 
 import com.beeeye.Beeeye;
 import com.beeeye.StereoRenderer;
+import com.beeeye.StereoState;
 import com.mojang.blaze3d.pipeline.RenderTarget;
 import net.minecraft.client.Minecraft;
 import org.spongepowered.asm.mixin.Mixin;
@@ -27,17 +28,15 @@ public class MixinMinecraft {
     ) {
         if (!Beeeye.isStereoEnabled()) return;
 
-        // During eye rendering, redirect to current eye's FBO
-        if (StereoRenderer.isRenderingEye()) {
-            RenderTarget eyeFbo = StereoRenderer.getCurrentEyeFbo();
+        if (StereoState.isRenderingEye()) {
+            RenderTarget eyeFbo = StereoState.getCurrentEyeFbo();
             if (eyeFbo != null) {
                 cir.setReturnValue(eyeFbo);
             }
             return;
         }
 
-        // During HUD phase, redirect to hudFbo
-        if (StereoRenderer.isHudPhase()) {
+        if (StereoState.isHudPhase()) {
             RenderTarget hudFbo = StereoRenderer.getHudFbo();
             if (hudFbo != null) {
                 cir.setReturnValue(hudFbo);

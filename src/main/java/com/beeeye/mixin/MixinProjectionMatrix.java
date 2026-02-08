@@ -1,7 +1,7 @@
 package com.beeeye.mixin;
 
 import com.beeeye.Beeeye;
-import com.beeeye.StereoRenderer;
+import com.beeeye.StereoState;
 import net.minecraft.client.renderer.GameRenderer;
 import org.joml.Matrix4f;
 import org.spongepowered.asm.mixin.Mixin;
@@ -22,14 +22,12 @@ public abstract class MixinProjectionMatrix {
         float fov,
         CallbackInfoReturnable<Matrix4f> cir
     ) {
-        if (
-            !Beeeye.isStereoEnabled() || !StereoRenderer.isInStereoPass()
-        ) return;
+        if (!Beeeye.isStereoEnabled() || !StereoState.isInStereoPass()) return;
 
         Matrix4f matrix = cir.getReturnValue();
         if (matrix == null) return;
 
-        float shift = StereoRenderer.getProjectionOffset(matrix.m00());
+        float shift = StereoState.getProjectionOffset(matrix.m00());
         if (shift != 0) {
             matrix.m20(matrix.m20() + shift);
         }

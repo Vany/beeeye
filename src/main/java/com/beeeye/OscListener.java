@@ -2,6 +2,7 @@ package com.beeeye;
 
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
+import java.net.SocketException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
@@ -56,10 +57,13 @@ public class OscListener {
                     Beeeye.LOGGER.warn("[Beeeye] OSC parse error", e);
                 }
             }
-        } catch (Exception e) {
+        } catch (SocketException e) {
+            // Expected when socket.close() is called during shutdown
             if (running) {
-                Beeeye.LOGGER.error("[Beeeye] OSC listener error", e);
+                Beeeye.LOGGER.error("[Beeeye] OSC socket error", e);
             }
+        } catch (Exception e) {
+            Beeeye.LOGGER.error("[Beeeye] OSC listener error", e);
         } finally {
             if (socket != null && !socket.isClosed()) socket.close();
             Beeeye.LOGGER.info("[Beeeye] OSC listener stopped");

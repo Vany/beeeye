@@ -22,6 +22,7 @@ public class GlFboCache {
 
     private final int[] fbos = new int[COUNT];
     private final int[] textures = new int[COUNT];
+    private boolean statusErrorLogged = false;
 
     /**
      * Get a valid GL FBO for the given slot, bound to the given texture.
@@ -33,7 +34,6 @@ public class GlFboCache {
             return fbos[i];
         }
 
-        // Texture changed or first use — recreate
         if (fbos[i] != 0) {
             GL30.glDeleteFramebuffers(fbos[i]);
         }
@@ -46,6 +46,16 @@ public class GlFboCache {
             textureId,
             0
         );
+
+        int status = GL30.glCheckFramebufferStatus(GL30.GL_FRAMEBUFFER);
+        if (status != GL30.GL_FRAMEBUFFER_COMPLETE && !statusErrorLogged) {
+            statusErrorLogged = true;
+            Beeeye.LOGGER.error(
+                "FBO {} incomplete (status 0x{}), compositing may fail",
+                slot,
+                Integer.toHexString(status)
+            );
+        }
 
         fbos[i] = fbo;
         textures[i] = textureId;
@@ -61,5 +71,6 @@ public class GlFboCache {
                 textures[i] = 0;
             }
         }
+        statusErrorLogged = false;
     }
 }

@@ -1,25 +1,24 @@
 package com.beeeye.mixin;
 
 import com.beeeye.Beeeye;
+import com.beeeye.BinocularPicker;
 import com.beeeye.BodyCrosshair;
+import com.beeeye.Convergence;
 import com.beeeye.GlFboCache;
 import com.beeeye.GlFboCache.Slot;
 import com.beeeye.GlTextureUtil;
 import com.beeeye.HeadTracker;
 import com.beeeye.StereoRenderer;
-import com.beeeye.StereoRenderer.Eye;
-import com.beeeye.StereoRenderer.RenderPhase;
+import com.beeeye.StereoRenderer.BlitRect;
+import com.beeeye.StereoState;
+import com.beeeye.StereoState.Eye;
+import com.beeeye.StereoState.RenderPhase;
 import com.mojang.blaze3d.pipeline.RenderTarget;
 import net.minecraft.client.Camera;
 import net.minecraft.client.DeltaTracker;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.GameRenderer;
 import net.minecraft.client.renderer.GlobalSettingsUniform;
-import net.minecraft.world.entity.EntitySelector;
-import net.minecraft.world.entity.projectile.ProjectileUtil;
-import net.minecraft.world.level.ClipContext;
-import net.minecraft.world.phys.AABB;
-import net.minecraft.world.phys.EntityHitResult;
 import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
 import org.lwjgl.opengl.GL11;
@@ -81,9 +80,8 @@ public abstract class MixinGameRenderer {
             beeeye$renderStereoFrame(deltaTracker);
         } catch (Exception e) {
             Beeeye.LOGGER.error("Stereo render error", e);
-            // Only reset phase on error — normal flow sets HUD_CAPTURE at end
-            StereoRenderer.setPhase(RenderPhase.INACTIVE);
-            StereoRenderer.setCurrentEye(null);
+            StereoState.setPhase(RenderPhase.INACTIVE);
+            StereoState.setCurrentEye(null);
         } finally {
             beeeye$inStereoRender = false;
         }
@@ -97,7 +95,7 @@ public abstract class MixinGameRenderer {
     ) {
         if (!beeeye$stereoReady) return;
         beeeye$stereoReady = false;
-        StereoRenderer.setPhase(RenderPhase.COMPOSITING);
+        StereoState.setPhase(RenderPhase.COMPOSITING);
 
         RenderTarget mainTarget = minecraft.getMainRenderTarget();
         RenderTarget leftFbo = StereoRenderer.getLeftEyeFbo();
@@ -111,11 +109,10 @@ public abstract class MixinGameRenderer {
             compositeRT == null
         ) return;
 
-        int fullW = mainTarget.width,
-            fullH = mainTarget.height,
-            halfW = fullW / 2;
+        int fullW = mainTarget.width;
+        int fullH = mainTarget.height;
+        int halfW = fullW / 2;
 
-        // Resolve GL texture IDs via reflection utility
         int mainTex = GlTextureUtil.textureId(mainTarget.getColorTexture());
         int leftTex = GlTextureUtil.textureId(leftFbo.getColorTexture());
         int rightTex = GlTextureUtil.textureId(rightFbo.getColorTexture());
@@ -138,36 +135,18 @@ public abstract class MixinGameRenderer {
         int hudGl = cache.fbo(Slot.HUD, hudTex);
         int compositeGl = cache.fbo(Slot.COMPOSITE, compositeTex);
 
+        BlitRect eye = BlitRect.region(0, 0, halfW, fullH);
+        BlitRect leftHalf = eye;
+        BlitRect rightHalf = BlitRect.region(halfW, 0, halfW, fullH);
+
         // Eyes -> main target halves
-        beeeye$blit(leftGl, mainGl, 0, 0, halfW, fullH, 0, 0, halfW, fullH);
-        beeeye$blit(
-            rightGl,
-            mainGl,
-            0,
-            0,
-            halfW,
-            fullH,
-            halfW,
-            0,
-            fullW,
-            fullH
-        );
+        beeeye$blit(leftGl, mainGl, eye, leftHalf);
+        beeeye$blit(rightGl, mainGl, eye, rightHalf);
 
         // HUD -> both halves of composite buffer
         StereoRenderer.clearFbo(compositeRT);
-        beeeye$blit(hudGl, compositeGl, 0, 0, halfW, fullH, 0, 0, halfW, fullH);
-        beeeye$blit(
-            hudGl,
-            compositeGl,
-            0,
-            0,
-            halfW,
-            fullH,
-            halfW,
-            0,
-            fullW,
-            fullH
-        );
+        beeeye$blit(hudGl, compositeGl, eye, leftHalf);
+        beeeye$blit(hudGl, compositeGl, eye, rightHalf);
 
         // Alpha-blend composite (HUD) onto main target
         GL30.glBindFramebuffer(GL30.GL_FRAMEBUFFER, 0);
@@ -178,7 +157,7 @@ public abstract class MixinGameRenderer {
             BodyCrosshair.draw(mainGl, fullW, fullH);
         }
 
-        StereoRenderer.setPhase(RenderPhase.INACTIVE);
+        StereoState.setPhase(RenderPhase.INACTIVE);
     }
 
     // =========================================================================
@@ -190,91 +169,36 @@ public abstract class MixinGameRenderer {
         RenderTarget mainTarget = minecraft.getMainRenderTarget();
         StereoRenderer.ensureFramebuffers(mainTarget.width, mainTarget.height);
 
-        if (
-            StereoRenderer.isDynamicConvergenceEnabled() &&
-            minecraft.player != null
-        ) {
+        if (Convergence.isDynamic() && minecraft.player != null) {
             Vec3 eyePos = minecraft.player.getEyePosition(1.0f);
             HitResult hit = minecraft.hitResult;
             float targetDistance;
             if (hit != null && hit.getType() != HitResult.Type.MISS) {
                 targetDistance = (float) hit.getLocation().distanceTo(eyePos);
             } else {
-                targetDistance = beeeye$pickEntityViaEyeRays(eyePos);
+                targetDistance = BinocularPicker.pick(
+                    eyePos,
+                    mainCamera,
+                    minecraft.level,
+                    minecraft.player
+                );
             }
-            StereoRenderer.updateDynamicConvergence(targetDistance);
+            Convergence.update(targetDistance);
         }
 
         for (Eye eye : Eye.values()) {
-            StereoRenderer.setCurrentEye(eye);
-            StereoRenderer.setPhase(RenderPhase.EYE_RENDER);
-            StereoRenderer.clearFbo(StereoRenderer.getCurrentEyeFbo());
+            StereoState.setCurrentEye(eye);
+            StereoState.setPhase(RenderPhase.EYE_RENDER);
+            StereoRenderer.clearFbo(StereoState.getCurrentEyeFbo());
             updateCamera(deltaTracker);
             beeeye$refreshGlobalUniforms(deltaTracker);
             renderLevel(deltaTracker);
         }
 
-        StereoRenderer.setCurrentEye(null);
+        StereoState.setCurrentEye(null);
         StereoRenderer.clearFbo(StereoRenderer.getHudFbo());
         beeeye$stereoReady = true;
-        StereoRenderer.setPhase(RenderPhase.HUD_CAPTURE);
-    }
-
-    // =========================================================================
-    // Dynamic convergence — eye-ray picking
-    // =========================================================================
-
-    @Unique
-    private float beeeye$pickEntityViaEyeRays(Vec3 eyePos) {
-        float staticConv = StereoRenderer.getStaticConvergence();
-        if (
-            minecraft.player == null || minecraft.level == null
-        ) return staticConv;
-
-        Vec3 forward = new Vec3(mainCamera.forwardVector());
-        Vec3 left = new Vec3(mainCamera.leftVector());
-        float halfIPD = StereoRenderer.getIPD() / 2.0f;
-        float convDist = StereoRenderer.getConvergence();
-        Vec3 convergencePoint = eyePos.add(forward.scale(convDist));
-
-        Vec3 leftEyePos = eyePos.add(left.scale(halfIPD));
-        Vec3 rightEyePos = eyePos.subtract(left.scale(halfIPD));
-
-        double bestDistSq = Double.MAX_VALUE;
-
-        for (Vec3 eyeOrigin : new Vec3[] { leftEyePos, rightEyePos }) {
-            HitResult blockHit = minecraft.level.clip(
-                new ClipContext(
-                    eyeOrigin,
-                    convergencePoint,
-                    ClipContext.Block.OUTLINE,
-                    ClipContext.Fluid.NONE,
-                    minecraft.player
-                )
-            );
-            if (blockHit.getType() != HitResult.Type.MISS) {
-                double d = blockHit.getLocation().distanceToSqr(eyePos);
-                if (d < bestDistSq) bestDistSq = d;
-            }
-
-            AABB searchBox = new AABB(eyeOrigin, convergencePoint).inflate(1.0);
-            EntityHitResult entityHit = ProjectileUtil.getEntityHitResult(
-                minecraft.player,
-                eyeOrigin,
-                convergencePoint,
-                searchBox,
-                EntitySelector.CAN_BE_PICKED,
-                convDist * convDist + 4.0
-            );
-            if (entityHit != null) {
-                double d = entityHit.getLocation().distanceToSqr(eyePos);
-                if (d < bestDistSq) bestDistSq = d;
-            }
-        }
-
-        return bestDistSq < Double.MAX_VALUE
-            ? (float) Math.sqrt(bestDistSq)
-            : staticConv;
+        StereoState.setPhase(RenderPhase.HUD_CAPTURE);
     }
 
     // =========================================================================
@@ -285,26 +209,20 @@ public abstract class MixinGameRenderer {
     private static void beeeye$blit(
         int readFbo,
         int drawFbo,
-        int sx0,
-        int sy0,
-        int sx1,
-        int sy1,
-        int dx0,
-        int dy0,
-        int dx1,
-        int dy1
+        BlitRect src,
+        BlitRect dst
     ) {
         GL30.glBindFramebuffer(GL30.GL_READ_FRAMEBUFFER, readFbo);
         GL30.glBindFramebuffer(GL30.GL_DRAW_FRAMEBUFFER, drawFbo);
         GL30.glBlitFramebuffer(
-            sx0,
-            sy0,
-            sx1,
-            sy1,
-            dx0,
-            dy0,
-            dx1,
-            dy1,
+            src.x0(),
+            src.y0(),
+            src.x1(),
+            src.y1(),
+            dst.x0(),
+            dst.y0(),
+            dst.x1(),
+            dst.y1(),
             GL11.GL_COLOR_BUFFER_BIT,
             GL11.GL_NEAREST
         );

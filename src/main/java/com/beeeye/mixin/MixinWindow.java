@@ -1,7 +1,7 @@
 package com.beeeye.mixin;
 
 import com.beeeye.Beeeye;
-import com.beeeye.StereoRenderer;
+import com.beeeye.StereoState;
 import com.mojang.blaze3d.platform.Window;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
@@ -31,11 +31,10 @@ public class MixinWindow {
     @Inject(method = "getWidth", at = @At("HEAD"), cancellable = true)
     private void beeeye$fakeWidth(CallbackInfoReturnable<Integer> cir) {
         if (!Beeeye.isStereoEnabled()) return;
-        // Only fake during rendering phases — resizeDisplay() needs real width
-        StereoRenderer.RenderPhase phase = StereoRenderer.getPhase();
+        StereoState.RenderPhase phase = StereoState.getPhase();
         if (
-            phase == StereoRenderer.RenderPhase.EYE_RENDER ||
-            phase == StereoRenderer.RenderPhase.HUD_CAPTURE
+            phase == StereoState.RenderPhase.EYE_RENDER ||
+            phase == StereoState.RenderPhase.HUD_CAPTURE
         ) {
             cir.setReturnValue(framebufferWidth / 2);
         }

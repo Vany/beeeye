@@ -11,9 +11,14 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public class GlTextureUtil {
 
-    private static final ConcurrentHashMap<Class<?>, Method> glIdCache = new ConcurrentHashMap<>();
-    private static boolean unwrapProbed;
+    private static final ConcurrentHashMap<Class<?>, Method> glIdCache =
+        new ConcurrentHashMap<>();
+
+    /** Cached unwrap state — probed once, reused for all subsequent calls. */
+    private static volatile boolean unwrapProbed;
     private static Method unwrapMethod;
+    private static Class<?> validationClass;
+
     private static boolean errorLogged;
 
     /** Returns the GL texture ID, or -1 on failure. */
@@ -22,8 +27,11 @@ public class GlTextureUtil {
         try {
             GpuTexture real = unwrap(texture);
             Method glId = glIdCache.computeIfAbsent(real.getClass(), cls -> {
-                try { return cls.getMethod("glId"); }
-                catch (NoSuchMethodException e) { return null; }
+                try {
+                    return cls.getMethod("glId");
+                } catch (NoSuchMethodException e) {
+                    return null;
+                }
             });
             if (glId == null) {
                 logOnce("No glId method on {}", real.getClass().getName());
@@ -39,12 +47,19 @@ public class GlTextureUtil {
     private static GpuTexture unwrap(GpuTexture texture) throws Exception {
         if (!unwrapProbed) {
             unwrapProbed = true;
-            if (texture.getClass().getName().contains("Validation")) {
-                try { unwrapMethod = texture.getClass().getMethod("getRealTexture"); }
-                catch (NoSuchMethodException ignored) {}
+            Class<?> cls = texture.getClass();
+            if (cls.getName().contains("Validation")) {
+                validationClass = cls;
+                try {
+                    unwrapMethod = cls.getMethod("getRealTexture");
+                } catch (NoSuchMethodException ignored) {}
             }
         }
-        if (unwrapMethod != null && texture.getClass().getName().contains("Validation")) {
+        if (
+            unwrapMethod != null &&
+            validationClass != null &&
+            validationClass.isInstance(texture)
+        ) {
             return (GpuTexture) unwrapMethod.invoke(texture);
         }
         return texture;
