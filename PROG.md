@@ -1,2 +1,3 @@
+- before implementing new feature try to understand, do we have similar functionality in some opensourse library.
 - if bug was fixed, check is same condition appear elsewhere and you can fix another similar bug.
 - use enough debug prints in code, we will remove it on release.
