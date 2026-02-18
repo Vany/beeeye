@@ -10,7 +10,8 @@ Renders the game in side-by-side stereo format for use with AR glasses, 3D monit
 - Side-by-side output (left eye | right eye)
 - HUD and GUI rendered correctly in both eyes
 - Dynamic convergence with binocular eye-ray picking
-- Head tracking via OSC (data OSC app) with smoothing and dead zones
+- Head tracking via OSC (data OSC app or Rust `ht` bridge for Xreal Air 2) with dual dead zones
+- Head-tracked interactions: break/place/hit follows where you look, not where mouse points
 - Stereo mouse: GUI/crafting works on both eye halves
 
 ## Requirements
@@ -111,10 +112,8 @@ UDP port to listen for OSC face-tracking data. Configure your OSC source app (da
 
 Head tracking dead zone in degrees. Two dead zones work together:
 
-1. **Neutral dead zone**: When head is within this many degrees of calibration center, camera snaps to body direction (zero offset). Provides a stable "look straight ahead" rest position.
-2. **Anchored dead zone**: At any other angle, jitter is suppressed around the last stable head position. The dead zone follows where your head last came to rest, not just the calibration center.
-
-Movement is considered finished when the head stays within the dead zone for `convergenceSpeed` ticks. This prevents premature settling during slow head movements.
+1. **Neutral dead zone**: When head is within this many degrees of calibration center, camera snaps to body direction (zero offset) **instantly**. Provides a stable "look straight ahead" rest position.
+2. **Anchored dead zone**: At any other angle, jitter is suppressed around the last stable head position. The dead zone follows where your head last came to rest, not just the calibration center. Anchor locks after **100ms** settle time to prevent snapping when passing through.
 
 - **0**: No dead zone — every micro-movement tracked (jittery)
 - **1-2**: Low jitter suppression, responsive
@@ -144,10 +143,12 @@ Beeeye supports head tracking via OSC protocol, using the [data OSC](https://app
 
 ### How it works
 
-- **Body** (mouse) controls crosshair, movement direction, and player rotation
-- **Head** (OSC tracking) adds camera rotation offset on top of body direction
+- **Body** (mouse) controls movement direction and player rotation
+- **Head** (OSC tracking) controls camera view and interactions (break/place/hit)
 - A `< >` body crosshair shows where the mouse points when head is turned away
+- When body crosshair is outside the viewport, a chevron arrow on the edge points toward it
 - Head tracking is only active in stereo mode
+- No smoothing applied — OSC source is expected to provide filtered data
 
 ## How It Works
 

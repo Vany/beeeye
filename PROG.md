@@ -1,2 +1,2 @@
 - if bug was fixed, check is same condition appear elsewhere and you can fix another similar bug.
-- use enough debug prints in code.
+- use enough debug prints in code, we will remove it on release.

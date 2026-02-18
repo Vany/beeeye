@@ -2,8 +2,9 @@
 
 ### Current Implementation: Off-Axis Projection Stereo + HUD Alpha Compositing
 
-**Status**: v1.0.2. Config-driven IPD and convergence. HUD alpha composited to both eyes.
-Head tracking via OSC with nlerp smoothing and dual dead zone. Stereo mouse on both halves.
+**Status**: v1.1.0. Config-driven IPD and convergence. HUD alpha composited to both eyes.
+Head tracking via OSC with raw passthrough and dual dead zone (100ms anchor settle).
+Head-tracked interaction picking. Stereo mouse on both halves.
 
 #### Stereo Approaches Tried
 
@@ -95,7 +96,7 @@ used for HUD rendering (hudFbo) and alpha compositing (compositeTarget).
 | `MixinMinecraft.java` | Redirects `getMainRenderTarget()` to eye/HUD FBO |
 | `MixinWindow.java` | Fakes width/guiScaledWidth to half (phase-gated) |
 | `MixinMouseHandler.java` | Translates mouse X for both eye halves (xpos + getScaledXPos) |
-| `HeadTracker.java` | Immutable Quat record, nlerp smoothing, anchored dead zone |
+| `HeadTracker.java` | Immutable Quat record, raw passthrough, dual dead zone |
 | `OscListener.java` | UDP OSC receiver, buffers quaternion components |
 | `BodyCrosshair.java` | Body direction crosshair via scissor+clear |
 | `GlTextureUtil.java` | ValidationGpuTexture unwrapping via reflection |
@@ -108,9 +109,9 @@ used for HUD rendering (hudFbo) and alpha compositing (compositeTarget).
 - **OSC protocol**: Receives quaternion rotation from data OSC app
 - **OSC paths**: `/data/faceTracking/face/rotation/{x,y,z,w}` — buffered, pushed on /w
 - **Immutable Quat record**: Atomic reference swap eliminates tearing between OSC and render threads
-- **nlerp smoothing**: Factor 0.4, fast slerp approximation at high sample rates
-- **Anchored dead zone**: Dead zone centered on last stable position, not calibration center
-  - When moving and settling within dead zone → anchor snaps, output frozen
+- **Raw passthrough**: No nlerp smoothing — OSC source provides filtered data
+- **Dual dead zone**: Neutral (instant snap to zero) + anchored (100ms settle before lock)
+  - When moving and settling within dead zone for 100ms → anchor locks, output frozen
   - When stationary and breaking out of dead zone → start moving again
   - Eliminates jitter at any head angle, not just neutral
 - **Calibration**: `HeadTracker.calibrate()` saves current as neutral, resets anchor
@@ -128,6 +129,26 @@ Replaces 4 independent booleans with single enum: `INACTIVE, EYE_RENDER, HUD_CAP
 - `convergence`: 5.0 blocks (default), range 1.0-50.0 — zero parallax distance (fallback for dynamic)
 - `dynamicConvergence`: true (default) — auto-adjust convergence to crosshair target distance
 - `convergenceSpeed`: 4 ticks (default), range 1-40 — time in minecraft ticks to reach new target distance. Replaces old `convergenceSmoothing` lerp factor. Internally converted to per-tick lerp: `1 - exp(-2.2 / speed)` for smooth exponential approach.
+
+#### Dynamic Convergence Flickering Fix
+
+**Problem**: Convergence oscillated rapidly between near/far when head tracking was active.
+
+**Root causes** (two reinforcing issues):
+1. `minecraft.hitResult` uses **body direction** (mouse), not head-tracked camera direction.
+   With head turned, player sees a close block but hitResult points at sky → convergence
+   jumps to static fallback → next frame snaps back → flicker.
+2. `BinocularPicker` cast eye rays toward **current convergence point**, creating a feedback
+   loop: convergence far → rays aim far → miss close block → stay far; convergence near →
+   rays aim near → hit → stay near. Any perturbation caused oscillation.
+
+**Fix**:
+1. Moved convergence update to **after LEFT eye camera setup** — `mainCamera` now includes
+   head tracking rotation, so rays match what the player actually sees.
+2. Replaced `minecraft.hitResult` with own center ray using camera's head-tracked forward vector.
+3. BinocularPicker now casts all rays **forward along look direction at fixed 128-block range**
+   instead of toward current convergence point. Eliminates feedback loop.
+4. Three-tier picking: center ray → binocular eye rays → static fallback.
 - `oscPort`: 9001 (default), range 1024-65535 — UDP port for OSC head tracking data
 - `headDeadzone`: 2.0 degrees (default), range 0.0-15.0 — angular dead zone for head tracking
 

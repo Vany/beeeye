@@ -19,6 +19,11 @@ import net.minecraft.client.DeltaTracker;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.GameRenderer;
 import net.minecraft.client.renderer.GlobalSettingsUniform;
+import net.minecraft.world.entity.EntitySelector;
+import net.minecraft.world.entity.projectile.ProjectileUtil;
+import net.minecraft.world.level.ClipContext;
+import net.minecraft.world.phys.AABB;
+import net.minecraft.world.phys.EntityHitResult;
 import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
 import org.lwjgl.opengl.GL11;
@@ -152,6 +157,9 @@ public abstract class MixinGameRenderer {
         GL30.glBindFramebuffer(GL30.GL_FRAMEBUFFER, 0);
         compositeRT.blitAndBlendToTexture(mainTarget.getColorTextureView());
 
+        // Convergence-offset crosshair (replaces vanilla crosshair suppressed by MixinGui)
+        BodyCrosshair.drawConvergenceCrosshair(mainGl, fullW, fullH);
+
         // Body crosshair overlay
         if (HeadTracker.isActive()) {
             BodyCrosshair.draw(mainGl, fullW, fullH);
@@ -169,28 +177,27 @@ public abstract class MixinGameRenderer {
         RenderTarget mainTarget = minecraft.getMainRenderTarget();
         StereoRenderer.ensureFramebuffers(mainTarget.width, mainTarget.height);
 
-        if (Convergence.isDynamic() && minecraft.player != null) {
-            Vec3 eyePos = minecraft.player.getEyePosition(1.0f);
-            HitResult hit = minecraft.hitResult;
-            float targetDistance;
-            if (hit != null && hit.getType() != HitResult.Type.MISS) {
-                targetDistance = (float) hit.getLocation().distanceTo(eyePos);
-            } else {
-                targetDistance = BinocularPicker.pick(
-                    eyePos,
-                    mainCamera,
-                    minecraft.level,
-                    minecraft.player
-                );
-            }
-            Convergence.update(targetDistance);
-        }
-
         for (Eye eye : Eye.values()) {
             StereoState.setCurrentEye(eye);
             StereoState.setPhase(RenderPhase.EYE_RENDER);
             StereoRenderer.clearFbo(StereoState.getCurrentEyeFbo());
             updateCamera(deltaTracker);
+
+            // Update convergence after LEFT camera setup — mainCamera now
+            // includes head tracking, so rays match actual view direction.
+            if (
+                eye == Eye.LEFT &&
+                Convergence.isDynamic() &&
+                minecraft.player != null
+            ) {
+                float targetDistance = BinocularPicker.pick(
+                    mainCamera,
+                    minecraft.level,
+                    minecraft.player
+                );
+                Convergence.update(targetDistance);
+            }
+
             beeeye$refreshGlobalUniforms(deltaTracker);
             renderLevel(deltaTracker);
         }
@@ -199,6 +206,61 @@ public abstract class MixinGameRenderer {
         StereoRenderer.clearFbo(StereoRenderer.getHudFbo());
         beeeye$stereoReady = true;
         StereoState.setPhase(RenderPhase.HUD_CAPTURE);
+    }
+
+    // =========================================================================
+    // Head-tracked interaction picking
+    // =========================================================================
+
+    @Inject(method = "pick", at = @At("TAIL"))
+    private void beeeye$overridePick(float partialTick, CallbackInfo ci) {
+        if (!Beeeye.isStereoEnabled() || !HeadTracker.isActive()) return;
+        if (minecraft.player == null || minecraft.level == null) return;
+
+        Vec3 eyePos = minecraft.player.getEyePosition(partialTick);
+        Vec3 forward = new Vec3(mainCamera.forwardVector());
+
+        double blockRange = minecraft.player.blockInteractionRange();
+        double entityRange = minecraft.player.entityInteractionRange();
+        double maxRange = Math.max(blockRange, entityRange);
+        Vec3 endPos = eyePos.add(forward.scale(maxRange));
+
+        // Block raycast
+        HitResult blockHit = minecraft.level.clip(
+            new ClipContext(
+                eyePos,
+                endPos,
+                ClipContext.Block.OUTLINE,
+                ClipContext.Fluid.NONE,
+                minecraft.player
+            )
+        );
+
+        // Entity raycast
+        AABB searchBox = new AABB(eyePos, endPos).inflate(1.0);
+        EntityHitResult entityHit = ProjectileUtil.getEntityHitResult(
+            minecraft.player,
+            eyePos,
+            endPos,
+            searchBox,
+            EntitySelector.CAN_BE_PICKED,
+            entityRange * entityRange
+        );
+
+        // Pick closest
+        HitResult best = blockHit;
+        if (entityHit != null) {
+            double blockDist =
+                blockHit.getType() != HitResult.Type.MISS
+                    ? blockHit.getLocation().distanceToSqr(eyePos)
+                    : Double.MAX_VALUE;
+            double entityDist = entityHit.getLocation().distanceToSqr(eyePos);
+            if (entityDist < blockDist) best = entityHit;
+        }
+
+        minecraft.hitResult = best;
+        minecraft.crosshairPickEntity =
+            best instanceof EntityHitResult ehr ? ehr.getEntity() : null;
     }
 
     // =========================================================================

@@ -85,19 +85,6 @@ public class HeadTracker {
     /** Consider tracking lost after this silence duration. */
     private static final long TRACKING_TIMEOUT_MS = 500;
 
-    /** Nlerp blend factor — balances responsiveness vs jitter at ~60Hz OSC rate. */
-    private static final float NLERP_FACTOR = 0.4f;
-
-    /** Milliseconds per Minecraft tick, used for settle time calculation. */
-    private static final long MS_PER_TICK = 50L;
-
-    private static float getDeadZone() {
-        return BeeeyeConfig.get(
-            BeeeyeConfig.HEAD_DEADZONE,
-            BeeeyeConfig.DEFAULT_HEAD_DEADZONE
-        ).floatValue();
-    }
-
     // Single volatile references — atomic swap, no component tearing
     private static volatile Quat current = Quat.IDENTITY;
     private static volatile Quat neutralInverse = Quat.IDENTITY;
@@ -106,19 +93,21 @@ public class HeadTracker {
 
     // Anchor: the position where head last came to rest.
     // Dead zone is measured from anchor, not from calibration center.
-    // Written/read only on render thread (getDelta), so no volatile needed.
     private static Quat anchor = Quat.IDENTITY;
     private static boolean moving = false;
 
-    // Settle detection: head must stay within dead zone for convergenceSpeed × MS_PER_TICK.
-    // settleOrigin = position when we first entered the dead zone candidate area.
-    // settleStartMs = timestamp when settle candidate started.
-    private static Quat settleOrigin = Quat.IDENTITY;
+    /** Anchor dead zone requires 100ms settle before locking. */
+    private static final long SETTLE_MS = 100;
     private static long settleStartMs = 0;
 
-    /** Push a complete quaternion from OSC listener, with nlerp smoothing. */
+    /** Raw current quaternion from device. */
+    public static Quat getCurrent() {
+        return current;
+    }
+
+    /** Push a complete quaternion from OSC listener — raw passthrough, no smoothing. */
     public static void update(Quat q) {
-        current = current.nlerp(q, NLERP_FACTOR);
+        current = q;
         lastUpdateMs = System.currentTimeMillis();
     }
 
@@ -130,19 +119,24 @@ public class HeadTracker {
         );
     }
 
+    private static float getDeadZone() {
+        return BeeeyeConfig.get(
+            BeeeyeConfig.HEAD_DEADZONE,
+            BeeeyeConfig.DEFAULT_HEAD_DEADZONE
+        ).floatValue();
+    }
+
     /**
      * Get delta rotation relative to neutral, with two dead zones:
-     * 1. Neutral dead zone — when head is near calibration center, output snaps to zero
-     * 2. Anchor dead zone — at any other angle, jitter suppressed around last stable position
+     * 1. Neutral dead zone — when head is near calibration center, snap to zero
+     * 2. Anchor dead zone — at any angle, suppress jitter around last stable position
      */
     public static Quat getDelta() {
         Quat delta = current.mul(neutralInverse);
         float dz = getDeadZone();
 
         // Dead zone #1: neutral center — snap to zero when near calibration pose
-        float neutralYaw = Math.abs(delta.toYaw());
-        float neutralPitch = Math.abs(delta.toPitch());
-        if (neutralYaw < dz && neutralPitch < dz) {
+        if (Math.abs(delta.toYaw()) < dz && Math.abs(delta.toPitch()) < dz) {
             anchor = current;
             moving = false;
             return Quat.IDENTITY;
@@ -153,57 +147,60 @@ public class HeadTracker {
         float anchorYaw = Math.abs(anchorDelta.toYaw());
         float anchorPitch = Math.abs(anchorDelta.toPitch());
 
-        long settleMs =
-            BeeeyeConfig.get(
-                BeeeyeConfig.CONVERGENCE_SPEED,
-                BeeeyeConfig.DEFAULT_CONVERGENCE_SPEED
-            ) *
-            MS_PER_TICK;
-
         if (moving) {
-            Quat settleDelta = current.mul(settleOrigin.inverse());
-            float settleYaw = Math.abs(settleDelta.toYaw());
-            float settlePitch = Math.abs(settleDelta.toPitch());
-
-            if (settleYaw < dz && settlePitch < dz) {
-                if (System.currentTimeMillis() - settleStartMs >= settleMs) {
+            if (anchorYaw < dz && anchorPitch < dz) {
+                // Inside anchor dead zone — start or continue settle timer
+                if (settleStartMs == 0) {
+                    settleStartMs = System.currentTimeMillis();
+                } else if (
+                    System.currentTimeMillis() - settleStartMs >= SETTLE_MS
+                ) {
+                    // Settled for 100ms — lock anchor
                     moving = false;
-                    anchor = settleOrigin;
+                    settleStartMs = 0;
                     return anchor.mul(neutralInverse);
                 }
             } else {
-                settleOrigin = current;
-                settleStartMs = System.currentTimeMillis();
+                // Still moving — reset settle timer, update anchor
+                settleStartMs = 0;
             }
             anchor = current;
             return delta;
         } else {
+            // Stationary — check if moved beyond dead zone
             if (anchorYaw >= dz || anchorPitch >= dz) {
                 moving = true;
                 anchor = current;
-                settleOrigin = current;
-                settleStartMs = System.currentTimeMillis();
                 return delta;
             }
             return anchor.mul(neutralInverse);
         }
     }
 
-    /** Capture current quaternion as neutral pose. */
-    public static void calibrate() {
+    /**
+     * Capture current quaternion as neutral pose.
+     * Returns drift since last calibration (delta between old and new neutral),
+     * or null on first calibration / no data.
+     */
+    public static Quat calibrate() {
         Quat q = current;
         if (q.lengthSq() < 1e-3f) {
             Beeeye.LOGGER.warn(
                 "[Beeeye] Cannot calibrate — no quaternion data yet"
             );
-            return;
+            return null;
         }
+        Quat prevNeutralInv = neutralInverse;
+        boolean wasCalibrated = calibrated;
+
         neutralInverse = q.inverse();
         anchor = q;
-        settleOrigin = q;
-        settleStartMs = System.currentTimeMillis();
         moving = false;
+        settleStartMs = 0;
         calibrated = true;
+
+        Quat drift = wasCalibrated ? q.mul(prevNeutralInv) : null;
+
         Beeeye.LOGGER.info(
             "[Beeeye] Head tracking calibrated: q=({}, {}, {}, {})",
             String.format("%.3f", q.x),
@@ -211,5 +208,6 @@ public class HeadTracker {
             String.format("%.3f", q.z),
             String.format("%.3f", q.w)
         );
+        return drift;
     }
 }

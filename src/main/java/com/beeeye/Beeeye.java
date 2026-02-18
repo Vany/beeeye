@@ -70,19 +70,38 @@ public class Beeeye {
                 stereoEnabled ? "ENABLED" : "DISABLED"
             );
 
-            // Show on-screen message
             Minecraft mc = Minecraft.getInstance();
-            if (mc.player != null) {
-                String status = stereoEnabled ? "ON" : "OFF";
-                mc.player.displayClientMessage(
-                    Component.literal("Beeeye Stereo: " + status),
-                    true
-                );
-            }
 
             if (stereoEnabled) {
-                HeadTracker.calibrate();
+                HeadTracker.Quat drift = HeadTracker.calibrate();
+                if (mc.player != null) {
+                    HeadTracker.Quat q = HeadTracker.getCurrent();
+                    String msg = String.format(
+                        "Beeeye ON  q=(%.2f,%.2f,%.2f,%.2f)",
+                        q.x(),
+                        q.y(),
+                        q.z(),
+                        q.w()
+                    );
+                    if (drift != null) {
+                        msg += String.format(
+                            "  drift=(%.1f°, %.1f°)",
+                            drift.toYaw(),
+                            drift.toPitch()
+                        );
+                    }
+                    mc.player.displayClientMessage(
+                        Component.literal(msg),
+                        true
+                    );
+                }
             } else {
+                if (mc.player != null) {
+                    mc.player.displayClientMessage(
+                        Component.literal("Beeeye OFF"),
+                        true
+                    );
+                }
                 StereoRenderer.cleanup();
             }
         }

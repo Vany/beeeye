@@ -1,0 +1,12 @@
+[package]
+name = "ht"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+ar-drivers = { git = "https://github.com/badicsalex/ar-drivers-rs" }
+clap = { version = "4", features = ["derive"] }
+ctrlc = "3"
+nalgebra = "0.34"
+rosc = "0.11"

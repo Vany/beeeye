@@ -3,7 +3,7 @@
 
 **Mod ID:** `beeeye`  
 **Mod Name:** Beeeye  
-**Version:** 1.0.2  
+**Version:** 1.1.0  
 **Minecraft Version:** 1.21.1  
 **Mod Loader:** NeoForge  
 **Package:** `com.beeeye`
@@ -107,6 +107,18 @@ After stereo world capture, enter HUD phase:
 4. `blitAndBlendToTexture` uses ENTITY_OUTLINE_BLIT pipeline (SRC_ALPHA, ONE_MINUS_SRC_ALPHA)
 5. Transparent HUD pixels (alpha=0) leave stereo world untouched
 
+### 4.6 Crosshair (MixinGui + BodyCrosshair)
+
+The vanilla crosshair (`+`) is suppressed during HUD capture (MixinGui cancels `Gui.renderCrosshair`
+at HEAD when `isHudPhase()`). A `+` crosshair is drawn at the center of each eye half during compositing:
+
+1. No per-eye pixel shift — off-axis projection + camera eye offset already places objects at
+   convergence distance at zero parallax (screen center in each eye).
+2. Drawn via glScissor + glClear — two rectangles forming `+`.
+3. White with 80% opacity. Scaled by GUI scale to match vanilla crosshair proportions.
+
+Rendered after HUD alpha-compositing, before body crosshair overlay.
+
 ---
 
 ## 5. Head Tracking
@@ -115,12 +127,12 @@ After stereo world capture, enter HUD phase:
 
 The player has two independent orientations:
 
-- **Body** — controlled by mouse. Determines crosshair position, movement direction, and
-  player entity rotation. Unchanged by head tracking.
+- **Body** — controlled by mouse. Determines movement direction and player entity rotation.
 - **Head** — body direction + OSC head delta. The camera renders what the head sees.
+  **Interactions (break/place/hit) follow head direction** via head-tracked picking.
 
-Crosshair always stays at body direction. WASD movement uses body direction.
-The rendered view follows the physical head via camera rotation offset.
+WASD movement uses body direction. The rendered view and interactions follow the physical head.
+A `< >` body crosshair shows the body (mouse) direction when head is turned away.
 
 ### 5.2 OSC Receiver
 
@@ -143,10 +155,10 @@ HeadTracker uses immutable `Quat` records — JVM guarantees atomic reference as
 OSC thread writes new quaternions via `update()`, render thread reads via `getDelta()`.
 No locks needed; no component tearing possible.
 
-### 5.4 Smoothing
+### 5.4 Signal Processing
 
-Incoming quaternions are smoothed via nlerp (normalized linear interpolation) with factor 0.4.
-This is a fast slerp approximation, sufficient at high OSC sample rates (~60Hz).
+Incoming quaternions are passed through raw — no smoothing or filtering applied.
+The OSC source (Rust `ht` app or data OSC) is expected to provide already-filtered data.
 
 ### 5.5 Calibration
 
@@ -162,15 +174,11 @@ The inverse of the neutral quaternion is stored; delta rotation = current * neut
 Two dead zones suppress jitter:
 
 1. **Neutral dead zone**: When head is within `headDeadzone` degrees of calibration center,
-   output snaps to zero (identity quaternion). Provides a stable "look straight ahead" rest.
+   output snaps to zero (identity quaternion) **instantly**. Provides a stable "look straight ahead" rest.
 
 2. **Anchored dead zone**: At any other angle, dead zone is centered on the last stable position
    (anchor). Jitter is suppressed relative to where the head last came to rest, not just neutral.
-
-Settle detection uses time-based hysteresis:
-- Moving → settled: head must stay within dead zone of a settle candidate for
-  `convergenceSpeed × 50ms` before movement is considered finished.
-- Settled → moving: head must break out of dead zone around anchor to start tracking again.
+   Anchor locks after head stays within dead zone for **100ms** (prevents snapping when passing through).
 
 ### 5.7 Coordinate Conversion
 
@@ -183,7 +191,19 @@ deltaPitch = asin(clamp(2(dw*dx - dy*dz), -1, 1))
 
 Applied in MixinCamera after Minecraft sets body rotation, before eye offset.
 
-### 5.5 Body Crosshair
+### 5.8 Head-Tracked Interaction Picking
+
+When stereo + head tracking are active, `GameRenderer.pick()` is overridden at TAIL
+to re-raycast using the camera's head-tracked forward vector instead of the entity's
+body direction. This makes all interactions (break/place/hit/buttons) follow where
+the head is looking.
+
+- Raycasts from `player.getEyePosition()` along `mainCamera.forwardVector()`
+- Checks both blocks (`level.clip`) and entities (`ProjectileUtil.getEntityHitResult`)
+- Picks closest hit; sets `minecraft.hitResult` and `minecraft.crosshairPickEntity`
+- Uses `player.blockInteractionRange()` and `player.entityInteractionRange()` for distances
+
+### 5.9 Body Crosshair
 
 When head tracking is active, a `< >` bracket crosshair shows the body direction
 (where the mouse points) in the head camera's view. Uses perspective-correct projection:
@@ -194,12 +214,134 @@ screenY = halfH + tan(deltaPitch) / tan(halfFov) * halfW
 
 - **Light green**: MC crosshair (head center) is inside the brackets (head ≈ body)
 - **Yellow**: head has turned away from body direction
+- **Edge clamping**: when body crosshair would be outside the eye viewport, a single
+  rotated chevron is drawn pinned to the edge, pointing toward the actual crosshair position.
 
-Drawn onto HUD FBO after all other HUD rendering, before compositing to both eyes.
+Drawn onto main FBO after compositing, on both eye halves.
 
 ---
 
-## 6. Keybindings
+## 6. Head Tracking Bridge (`ht`)
+
+Standalone Rust application that reads IMU data from Xreal Air 2 AR glasses and streams
+orientation quaternions over OSC to the Beeeye mod. Replaces the data OSC iOS app with
+direct USB connection for lower latency and no phone dependency.
+
+### 6.1 Pipeline
+
+```
+Xreal Air 2 (USB-C) → ar-drivers-rs → EKF sensor fusion → OSC UDP → Beeeye mod
+```
+
+### 6.2 Sensor Input
+
+- **Hardware:** Xreal Air 2 AR glasses via USB-C
+- **Driver:** [ar-drivers-rs](https://github.com/badicsalex/ar-drivers-rs) community crate
+- **IMU rate:** 1000 Hz — accelerometer + gyroscope events (`GlassesEvent::AccGyro`)
+- **Magnetometer:** Received but unused (unreliable indoors)
+- **Coordinate system:** ar-drivers RUB — X=Right, Y=Up, Z=Back
+
+### 6.3 Sensor Fusion: 7-State Extended Kalman Filter
+
+The EKF fuses gyroscope and accelerometer into a stable orientation quaternion.
+
+**State vector (7 elements):**
+- Quaternion orientation: `[q_w, q_x, q_y, q_z]`
+- Gyroscope bias estimation: `[b_x, b_y, b_z]`
+
+**Predict step (every IMU sample):**
+- Bias-corrected angular velocity: `w = gyro - bias`
+- Quaternion propagation via Omega matrix: `q_new = q + 0.5 * Omega(w) * q * dt`
+- Covariance propagation: `P = F * P * F^T + Q`
+- `dt` derived from `Instant::now()` deltas (not assumed fixed)
+
+**Update step (accelerometer, gated):**
+- Only applied when `|‖accel‖ - 9.81| < 2.0 m/s²` (rejects non-gravity accelerations)
+- Predicted gravity in sensor frame: `h = C(q)^T * [0, 1, 0]` (Y-up convention)
+- Innovation: `y = normalize(accel) - h`
+- Standard Kalman update: `K = P * H^T * (H * P * H^T + R)^-1`, state += K * y
+- Quaternion renormalized after correction
+- Covariance symmetrized each step to prevent numerical drift
+
+**Tuning constants:**
+
+| Parameter | Value | Description |
+|-----------|-------|-------------|
+| `SIGMA_GYRO` | 0.01 rad/s | Gyroscope noise density |
+| `SIGMA_BIAS` | 0.001 rad/s² | Gyro bias random walk |
+| `SIGMA_ACCEL` | 0.5 | Accelerometer measurement noise |
+| `ACCEL_GATE` | 2.0 m/s² | Reject accel update when ‖a‖ deviates from g |
+
+**Initialization:** First accelerometer reading aligns orientation so gravity matches Y-up
+via `UnitQuaternion::rotation_between(accel, up)`.
+
+### 6.4 OSC Output
+
+Quaternion sent as 4 separate OSC float messages per sample to `localhost:8001`:
+
+| OSC Address | Value |
+|-------------|-------|
+| `/data/faceTracking/face/rotation/x` | `-q.i` (pitch negated) |
+| `/data/faceTracking/face/rotation/y` | `q.j` (yaw) |
+| `/data/faceTracking/face/rotation/z` | `-q.k` (z negated for handedness) |
+| `/data/faceTracking/face/rotation/w` | `q.w` (triggers update in Beeeye) |
+
+**Coordinate remapping:** ar-drivers RUB → Beeeye expects sign conventions matching
+data OSC app output. Pitch (x) and z are negated to correct axis/handedness.
+
+The `/w` message is sent last — Beeeye's `OscListener` buffers x/y/z and pushes
+a complete quaternion on receiving w.
+
+### 6.5 Usage
+
+```
+cargo run -- [--host <HOST>] [--port <PORT>]
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--host` | 127.0.0.1 | OSC target host |
+| `--port` | 8001 | OSC target port (matches Beeeye `oscPort` config) |
+
+Ctrl+C for graceful shutdown. Prints diagnostic telemetry every 200 samples.
+
+### 6.6 Debug Client
+
+`headtracking/client/` contains a standalone OSC listener that prints all received
+messages to stdout. Useful for verifying quaternion output without running Minecraft.
+
+```
+cd client && cargo run
+```
+
+### 6.7 Dependencies
+
+| Crate | Purpose |
+|-------|---------|
+| `ar-drivers` | Xreal Air 2 USB HID driver (git dep) |
+| `nalgebra` | Linear algebra (quaternions, matrices) |
+| `rosc` | OSC protocol encoding |
+| `clap` | CLI argument parsing |
+| `ctrlc` | Graceful shutdown on Ctrl+C |
+| `anyhow` | Error handling |
+
+### 6.8 Project Structure
+
+```
+headtracking/
+├── Cargo.toml                # Workspace root
+├── src/
+│   ├── main.rs               # Event loop: ar-drivers → fusion → OSC
+│   ├── fusion.rs             # 7-state EKF (quaternion + gyro bias)
+│   └── osc.rs                # OSC UDP sender with coordinate remapping
+└── client/
+    ├── Cargo.toml
+    └── src/main.rs           # Debug OSC listener (prints to stdout)
+```
+
+---
+
+## 7. Keybindings
 
 | Key | Action |
 |-----|--------|
@@ -210,13 +352,13 @@ Drawn onto HUD FBO after all other HUD rendering, before compositing to both eye
 
 ---
 
-## 7. Technical Approach
+## 8. Technical Approach
 
-### 7.1 Mixin-Based Architecture
+### 8.1 Mixin-Based Architecture
 
 All rendering modifications use SpongePowered Mixin injections. No NeoForge events for core rendering — mixins provide precise control over the render pipeline.
 
-### 7.2 FBO Layout
+### 8.2 FBO Layout
 
 | FBO | Size | Purpose |
 |-----|------|---------|
@@ -225,7 +367,7 @@ All rendering modifications use SpongePowered Mixin injections. No NeoForge even
 | compositeTarget | fullW x H | Intermediary for alpha blending (TextureTarget, no depth) |
 | Raw GL left/right FBOs | halfW x H | glBlitFramebuffer eye capture in MixinGameRenderer |
 
-### 7.3 OpenGL Constraints (macOS)
+### 8.3 OpenGL Constraints (macOS)
 
 - GL 4.1 max — no `glCopyImageSubData` (GL 4.3)
 - No legacy fixed-function pipeline — `glMatrixMode` crashes in core profile
@@ -235,7 +377,7 @@ All rendering modifications use SpongePowered Mixin injections. No NeoForge even
 
 ---
 
-## 8. Project Structure
+## 9. Project Structure
 
 ```
 beeeye/
@@ -250,7 +392,7 @@ beeeye/
 │   ├── BodyCrosshair.java           # Body direction crosshair (< > brackets)
 │   ├── GlFboCache.java              # GL FBO cache (int[] arrays, zero boxing)
 │   ├── GlTextureUtil.java           # ValidationGpuTexture unwrapping
-│   ├── HeadTracker.java             # Immutable Quat, nlerp smoothing, anchored dead zone
+│   ├── HeadTracker.java             # Immutable Quat, raw passthrough, dual dead zone
 │   ├── OscListener.java             # UDP OSC 1.0 receiver
 │   ├── StereoRenderer.java          # RenderPhase state machine, FBOs, projection
 │   └── mixin/
@@ -259,8 +401,7 @@ beeeye/
 │       ├── MixinCamera.java         # Head tracking camera rotation
 │       ├── MixinMinecraft.java      # Render target redirect during HUD
 │       ├── MixinWindow.java         # Phase-gated width faking
-│       ├── MixinGui.java            # GUI rendering hooks
-│       ├── MixinGuiCrosshair.java   # Crosshair convergence offset
+│       ├── MixinGui.java            # Suppress crosshair during HUD capture
 │       └── MixinMouseHandler.java   # Both-eye mouse translation
 └── src/main/resources/
     ├── META-INF/neoforge.mods.toml
@@ -270,7 +411,7 @@ beeeye/
 
 ---
 
-## 9. Future Scope
+## 10. Future Scope
 
 - Per-eye resolution scaling
 - Shader compatibility layer
@@ -279,12 +420,12 @@ beeeye/
 
 ---
 
-## 10. Build & Install
+## 11. Build & Install
 
 ```bash
 ./gradlew build
 ```
 
-Output: `build/libs/beeeye-1.0.2.jar`
+Output: `build/libs/beeeye-1.1.0.jar`
 
 Install: Copy JAR to `.minecraft/mods/` with NeoForge 1.21.1

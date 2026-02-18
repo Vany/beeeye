@@ -10,14 +10,13 @@ package com.beeeye;
  */
 public class Convergence {
 
-    public static final float MIN = 1.0f;
+    public static final float MIN_ABSOLUTE = 0.01f;
     public static final float MAX = 50.0f;
 
     /** Tuned exponential decay: ~90% convergence within `speed` ticks. */
     private static final double DECAY_RATE = 2.2;
 
-    private static float dynamic =
-        (float) BeeeyeConfig.DEFAULT_CONVERGENCE;
+    private static float dynamic = (float) BeeeyeConfig.DEFAULT_CONVERGENCE;
 
     /** Active convergence — dynamic (raycast-driven) or static from config. */
     public static float get() {
@@ -47,7 +46,8 @@ public class Convergence {
      * Speed=1 is near-instant, speed=4 is smooth default.
      */
     public static void update(float targetDistance) {
-        float clamped = Math.clamp(targetDistance, MIN, MAX);
+        float min = Math.max(StereoState.getIPD() / 2.0f, MIN_ABSOLUTE);
+        float clamped = Math.clamp(targetDistance, min, MAX);
         int speed = BeeeyeConfig.get(
             BeeeyeConfig.CONVERGENCE_SPEED,
             BeeeyeConfig.DEFAULT_CONVERGENCE_SPEED
