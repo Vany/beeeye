@@ -1,5 +1,10 @@
-![Release](https://img.shields.io/github/v/release/Vany/beeeye) ![Downloads](https://img.shields.io/github/downloads/Vany/beeeye/total)
-![Minecraft](https://img.shields.io/badge/Minecraft-%237CFC00.svg?style=for-the-badge&logo=minecraft&logoColor=white)![Java](https://img.shields.io/badge/Java-%23007396.svg?style=for-the-badge&logo=java&logoColor=white)![Rust](https://img.shields.io/badge/Rust-000000?style=for-the-badge&logo=rust&logoColor=white)
+![Release](https://img.shields.io/github/v/release/Vany/beeeye)
+![Downloads](https://img.shields.io/github/downloads/Vany/beeeye/total)
+![Minecraft](https://img.shields.io/badge/Minecraft-%237CFC00.svg?style=for-the-badge&logo=minecraft&logoColor=white)
+![Java](https://img.shields.io/badge/Java-%23007396.svg?style=for-the-badge&logo=java&logoColor=white)
+![Rust](https://img.shields.io/badge/Rust-000000?style=for-the-badge&logo=rust&logoColor=white)
+[![Modrinth Downloads](https://img.shields.io/beeeye?logo=modrinth)](https://modrinth.com/mod/beeeye)
+![curseforge](https://cf.way2muchnoise.eu/beeeye.svg)
 
 
 # Beeeye
