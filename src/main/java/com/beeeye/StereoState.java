@@ -3,7 +3,8 @@ package com.beeeye;
 import com.mojang.blaze3d.pipeline.RenderTarget;
 
 /**
- * Stereo rendering state machine — phase, current eye, and stereo parameter queries.
+ * Stereo rendering state machine — phase and current eye only.
+ * No physics math here; see {@link StereoPerspective} for projection/eye offset.
  *
  * Render phases (driven by MixinGameRenderer):
  *   {@link RenderPhase#EYE_RENDER} — each eye renders to half-width FBO.
@@ -82,29 +83,10 @@ public class StereoState {
     }
 
     // =========================================================================
-    // Stereo parameters
+    // IPD accessor — used by Convergence for minimum clamp, and StereoPerspective
     // =========================================================================
 
     public static float getIPD() {
-        return BeeeyeConfig.get(
-            BeeeyeConfig.EYE_DISTANCE,
-            BeeeyeConfig.DEFAULT_EYE_DISTANCE
-        ).floatValue();
-    }
-
-    /**
-     * Projection matrix m20 offset for asymmetric frustum stereo.
-     * Objects at convergence distance have zero parallax.
-     */
-    public static float getProjectionOffset(float m00) {
-        if (currentEye == null) return 0;
-        return -(((currentEye.sign * getIPD()) / 2.0f) * m00)
-            / Convergence.get();
-    }
-
-    /** Camera X offset: +/- IPD/2 along local X axis per eye. */
-    public static float getEyeOffset() {
-        if (currentEye == null) return 0;
-        return currentEye.sign * (getIPD() / 2.0f);
+        return BeeeyeConfig.eyeDistance();
     }
 }

@@ -24,6 +24,10 @@ public class Beeeye {
     private static volatile boolean stereoEnabled = false;
     private static final OscListener oscListener = new OscListener();
 
+    public static OscListener getOscListener() {
+        return oscListener;
+    }
+
     public Beeeye(IEventBus modEventBus, ModContainer modContainer) {
         LOGGER.info("Beeeye initializing...");
 
@@ -37,11 +41,7 @@ public class Beeeye {
         NeoForge.EVENT_BUS.addListener(this::onLoggingIn);
         NeoForge.EVENT_BUS.addListener(this::onLoggingOut);
 
-        int port = BeeeyeConfig.get(
-            BeeeyeConfig.OSC_PORT,
-            BeeeyeConfig.DEFAULT_OSC_PORT
-        );
-        oscListener.start(port);
+        oscListener.start(BeeeyeConfig.oscPort());
         Runtime.getRuntime().addShutdownHook(
             new Thread(oscListener::stop, "beeeye-osc-shutdown")
         );

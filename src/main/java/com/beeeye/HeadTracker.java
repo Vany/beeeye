@@ -85,12 +85,13 @@ public class HeadTracker {
     /** Consider tracking lost after this silence duration. */
     private static final long TRACKING_TIMEOUT_MS = 500;
 
-    // Single volatile references — atomic swap, no component tearing
+    // Written by OSC thread, read by render thread — volatile for atomic swap.
     private static volatile Quat current = Quat.IDENTITY;
     private static volatile Quat neutralInverse = Quat.IDENTITY;
     private static volatile boolean calibrated;
     private static volatile long lastUpdateMs;
 
+    // Render-thread-only state (dead zone logic). Not volatile — single thread.
     // Anchor: the position where head last came to rest.
     // Dead zone is measured from anchor, not from calibration center.
     private static Quat anchor = Quat.IDENTITY;
@@ -99,6 +100,11 @@ public class HeadTracker {
     /** Anchor dead zone requires 100ms settle before locking. */
     private static final long SETTLE_MS = 100;
     private static long settleStartMs = 0;
+
+    // Per-frame snapshot: computed once by snapshotDelta(), consumed by both
+    // camera setup passes (LEFT + RIGHT). Dead zone state machine runs exactly once.
+    // Render-thread-only — plain field, no volatile needed.
+    private static Quat frameDelta = Quat.IDENTITY;
 
     /** Raw current quaternion from device. */
     public static Quat getCurrent() {
@@ -120,18 +126,33 @@ public class HeadTracker {
     }
 
     private static float getDeadZone() {
-        return BeeeyeConfig.get(
-            BeeeyeConfig.HEAD_DEADZONE,
-            BeeeyeConfig.DEFAULT_HEAD_DEADZONE
-        ).floatValue();
+        return BeeeyeConfig.headDeadzone();
     }
 
     /**
-     * Get delta rotation relative to neutral, with two dead zones:
+     * Snapshot delta for this frame. Call once per frame (after LEFT camera setup)
+     * before reading getFrameDelta(). Runs the full dead zone state machine exactly once.
+     */
+    public static void snapshotDelta() {
+        frameDelta = computeDelta();
+    }
+
+    /**
+     * Cached per-frame delta — valid after snapshotDelta() is called.
+     * Both LEFT and RIGHT camera passes read this without re-running dead zone logic.
+     */
+    public static Quat getFrameDelta() {
+        return frameDelta;
+    }
+
+    /**
+     * Compute delta rotation relative to neutral, with two dead zones:
      * 1. Neutral dead zone — when head is near calibration center, snap to zero
      * 2. Anchor dead zone — at any angle, suppress jitter around last stable position
+     *
+     * Called only via snapshotDelta() — not directly from render code.
      */
-    public static Quat getDelta() {
+    private static Quat computeDelta() {
         Quat delta = current.mul(neutralInverse);
         float dz = getDeadZone();
 

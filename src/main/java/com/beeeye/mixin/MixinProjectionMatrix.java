@@ -1,6 +1,7 @@
 package com.beeeye.mixin;
 
 import com.beeeye.Beeeye;
+import com.beeeye.StereoPerspective;
 import com.beeeye.StereoState;
 import net.minecraft.client.renderer.GameRenderer;
 import org.joml.Matrix4f;
@@ -27,7 +28,7 @@ public abstract class MixinProjectionMatrix {
         Matrix4f matrix = cir.getReturnValue();
         if (matrix == null) return;
 
-        float shift = StereoState.getProjectionOffset(matrix.m00());
+        float shift = StereoPerspective.projectionOffset(matrix.m00());
         if (shift != 0) {
             matrix.m20(matrix.m20() + shift);
         }

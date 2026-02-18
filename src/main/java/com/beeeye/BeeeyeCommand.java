@@ -146,12 +146,11 @@ public class BeeeyeCommand {
             false
         );
 
-        int oscPort = BeeeyeConfig.get(
-            BeeeyeConfig.OSC_PORT,
-            BeeeyeConfig.DEFAULT_OSC_PORT
-        );
         src.sendSuccess(
-            () -> Component.literal("§6[Beeeye]§r OSC port: §e" + oscPort),
+            () ->
+                Component.literal(
+                    "§6[Beeeye]§r OSC port: §e" + BeeeyeConfig.oscPort()
+                ),
             false
         );
         return 1;
@@ -237,6 +236,11 @@ public class BeeeyeCommand {
             ((ModConfigSpec.DoubleValue) setting.config).set(value);
         }
         BeeeyeConfig.save();
+
+        // Hot-reload OSC listener on port change — no restart required
+        if (name.equals("oscport")) {
+            Beeeye.getOscListener().restart((int) value);
+        }
 
         String display = setting.isInt
             ? String.valueOf((int) value)

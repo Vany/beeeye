@@ -90,6 +90,34 @@ public class BeeeyeConfig {
         }
     }
 
+    // =========================================================================
+    // Typed accessors — single source of truth, no scattered fallback literals
+    // =========================================================================
+
+    public static float eyeDistance() {
+        return get(EYE_DISTANCE, DEFAULT_EYE_DISTANCE).floatValue();
+    }
+
+    public static float convergence() {
+        return get(CONVERGENCE, DEFAULT_CONVERGENCE).floatValue();
+    }
+
+    public static boolean dynamicConvergence() {
+        return get(DYNAMIC_CONVERGENCE, false);
+    }
+
+    public static int convergenceSpeed() {
+        return get(CONVERGENCE_SPEED, DEFAULT_CONVERGENCE_SPEED);
+    }
+
+    public static int oscPort() {
+        return get(OSC_PORT, DEFAULT_OSC_PORT);
+    }
+
+    public static float headDeadzone() {
+        return get(HEAD_DEADZONE, DEFAULT_HEAD_DEADZONE).floatValue();
+    }
+
     /** Persist current config values to disk. */
     public static void save() {
         SPEC.save();

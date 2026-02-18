@@ -2,67 +2,75 @@ package com.beeeye;
 
 import com.mojang.blaze3d.textures.GpuTexture;
 import java.lang.reflect.Method;
-import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Resolves OpenGL texture IDs from Minecraft's {@link GpuTexture} objects.
- * NeoForge wraps textures in ValidationGpuTexture — this utility unwraps
- * them via reflection and calls glId(). Results are cached per class.
+ * NeoForge wraps textures in ValidationGpuTexture — unwrapped via reflection
+ * on first call, then cached as plain static fields. Zero hash lookups,
+ * zero ConcurrentHashMap overhead on the hot compositing path.
  */
 public class GlTextureUtil {
 
-    private static final ConcurrentHashMap<Class<?>, Method> glIdCache =
-        new ConcurrentHashMap<>();
+    // Probed once on first textureId() call, then frozen.
+    private static volatile boolean probed = false;
+    private static Method unwrapMethod = null; // ValidationGpuTexture.getRealTexture()
+    private static Class<?> validationClass = null;
+    private static Method glIdMethod = null; // <real impl>.glId()
 
-    /** Cached unwrap state — probed once, reused for all subsequent calls. */
-    private static volatile boolean unwrapProbed;
-    private static Method unwrapMethod;
-    private static Class<?> validationClass;
-
-    private static boolean errorLogged;
+    private static boolean errorLogged = false;
 
     /** Returns the GL texture ID, or -1 on failure. */
     public static int textureId(GpuTexture texture) {
         if (texture == null) return -1;
         try {
-            GpuTexture real = unwrap(texture);
-            Method glId = glIdCache.computeIfAbsent(real.getClass(), cls -> {
-                try {
-                    return cls.getMethod("glId");
-                } catch (NoSuchMethodException e) {
-                    return null;
-                }
-            });
-            if (glId == null) {
-                logOnce("No glId method on {}", real.getClass().getName());
-                return -1;
+            if (!probed) probe(texture);
+
+            GpuTexture real = (unwrapMethod != null &&
+                validationClass != null &&
+                validationClass.isInstance(texture))
+                ? (GpuTexture) unwrapMethod.invoke(texture)
+                : texture;
+
+            if (glIdMethod == null) {
+                // glIdMethod resolved against the concrete real class on first successful unwrap
+                glIdMethod = real.getClass().getMethod("glId");
             }
-            return (int) glId.invoke(real);
+            return (int) glIdMethod.invoke(real);
         } catch (Exception e) {
             logOnce("Failed to get texture ID via reflection", e);
             return -1;
         }
     }
 
-    private static GpuTexture unwrap(GpuTexture texture) throws Exception {
-        if (!unwrapProbed) {
-            unwrapProbed = true;
+    /**
+     * Probe the texture class hierarchy once. After this call, unwrapMethod
+     * and glIdMethod are set (or null if unavailable) and probed=true prevents
+     * any further reflection.
+     */
+    private static synchronized void probe(GpuTexture texture) {
+        if (probed) return; // double-checked inside sync
+        try {
             Class<?> cls = texture.getClass();
+            GpuTexture real = texture;
+
             if (cls.getName().contains("Validation")) {
                 validationClass = cls;
                 try {
                     unwrapMethod = cls.getMethod("getRealTexture");
+                    real = (GpuTexture) unwrapMethod.invoke(texture);
                 } catch (NoSuchMethodException ignored) {}
             }
+
+            try {
+                glIdMethod = real.getClass().getMethod("glId");
+            } catch (NoSuchMethodException e) {
+                logOnce("No glId() on {}", real.getClass().getName());
+            }
+        } catch (Exception e) {
+            logOnce("GlTextureUtil probe failed", e);
+        } finally {
+            probed = true;
         }
-        if (
-            unwrapMethod != null &&
-            validationClass != null &&
-            validationClass.isInstance(texture)
-        ) {
-            return (GpuTexture) unwrapMethod.invoke(texture);
-        }
-        return texture;
     }
 
     private static void logOnce(String msg, Object... args) {

@@ -34,7 +34,7 @@ public class BodyCrosshair {
         float fovDeg = mc.options.fov().get();
         float tanHalfFov = (float) Math.tan(Math.toRadians(fovDeg / 2.0));
 
-        HeadTracker.Quat delta = HeadTracker.getDelta();
+        HeadTracker.Quat delta = HeadTracker.getFrameDelta();
         float deltaYaw = delta.toYaw();
         float deltaPitch = delta.toPitch();
 

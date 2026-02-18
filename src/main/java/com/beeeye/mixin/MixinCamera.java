@@ -2,6 +2,7 @@ package com.beeeye.mixin;
 
 import com.beeeye.Beeeye;
 import com.beeeye.HeadTracker;
+import com.beeeye.StereoPerspective;
 import com.beeeye.StereoState;
 import net.minecraft.client.Camera;
 import net.minecraft.world.entity.Entity;
@@ -45,9 +46,16 @@ public abstract class MixinCamera {
         float partialTick,
         CallbackInfo ci
     ) {
-        // Head tracking: only in stereo mode, single snapshot
+        // Head tracking: only in stereo mode.
+        // Snapshot dead zone state machine once on LEFT pass; RIGHT pass reuses cached result.
         if (Beeeye.isStereoEnabled() && HeadTracker.isActive()) {
-            HeadTracker.Quat delta = HeadTracker.getDelta();
+            if (
+                StereoState.getCurrentEye() == StereoState.Eye.LEFT ||
+                StereoState.getCurrentEye() == null
+            ) {
+                HeadTracker.snapshotDelta();
+            }
+            HeadTracker.Quat delta = HeadTracker.getFrameDelta();
             setRotation(
                 yRot + delta.toYaw(),
                 Math.clamp(xRot + delta.toPitch(), -90f, 90f)
@@ -57,7 +65,7 @@ public abstract class MixinCamera {
         // Stereo eye offset
         if (!Beeeye.isStereoEnabled() || !StereoState.isInStereoPass()) return;
 
-        float offset = StereoState.getEyeOffset();
+        float offset = StereoPerspective.eyeOffset();
         if (offset != 0) {
             move(0, 0, offset);
         }

@@ -25,10 +25,7 @@ public class Convergence {
 
     /** Static convergence from config (fallback for sky/no-hit). */
     public static float getStatic() {
-        return BeeeyeConfig.get(
-            BeeeyeConfig.CONVERGENCE,
-            BeeeyeConfig.DEFAULT_CONVERGENCE
-        ).floatValue();
+        return BeeeyeConfig.convergence();
     }
 
     /** Current dynamic convergence value (for status display). */
@@ -37,7 +34,7 @@ public class Convergence {
     }
 
     public static boolean isDynamic() {
-        return BeeeyeConfig.get(BeeeyeConfig.DYNAMIC_CONVERGENCE, false);
+        return BeeeyeConfig.dynamicConvergence();
     }
 
     /**
@@ -48,10 +45,7 @@ public class Convergence {
     public static void update(float targetDistance) {
         float min = Math.max(StereoState.getIPD() / 2.0f, MIN_ABSOLUTE);
         float clamped = Math.clamp(targetDistance, min, MAX);
-        int speed = BeeeyeConfig.get(
-            BeeeyeConfig.CONVERGENCE_SPEED,
-            BeeeyeConfig.DEFAULT_CONVERGENCE_SPEED
-        );
+        int speed = BeeeyeConfig.convergenceSpeed();
         float smoothing = (float) (1.0 - Math.exp(-DECAY_RATE / speed));
         dynamic += (clamped - dynamic) * smoothing;
     }
