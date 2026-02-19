@@ -1,5 +1,5 @@
 [![Minecraft](https://img.shields.io/badge/Minecraft-1.21.11-green.svg)](https://minecraft.net/)
-[![NeoForge](https://img.shields.io/badge/NeoForge-21.1.172+-orange.svg)](https://neoforged.net/)
+[![NeoForge](https://img.shields.io/badge/NeoForge-21.11.38+-orange.svg)](https://neoforged.net/)
 [![Java](https://img.shields.io/badge/Java-21+-blue.svg)](https://openjdk.org/)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/Vany/beeeye)](https://github.com/Vany/beeeye/releases)
