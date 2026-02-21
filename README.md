@@ -12,7 +12,7 @@
 
 # Beeeye
 
-Stereoscopic 3D rendering mod for Minecraft 1.21.1 (NeoForge).
+Stereoscopic 3D rendering mod for Minecraft 1.21.11 (NeoForge).
 Compatible with all other mods done right.
 Renders the game in side-by-side stereo format for use with AR glasses, 3D monitors, or cross-eye/parallel viewing.
 
