@@ -51,6 +51,13 @@ impl Fusion {
         }
     }
 
+    /// Reset filter state after device reconnect. Clears integration history so
+    /// stale orientation doesn't corrupt the new session.
+    pub fn reset(&mut self) {
+        *self = Self::new();
+        eprintln!("fusion: reset after reconnect");
+    }
+
     fn init_from_accel(&mut self, accel: &Vector3<f64>) {
         let a = accel.normalize();
         let up = Vector3::new(0.0, 1.0, 0.0);

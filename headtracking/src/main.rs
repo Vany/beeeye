@@ -32,21 +32,13 @@ struct Args {
     log: String,
 }
 
-/// Ensure glasses are in SBS stereo mode. Switch from any non-stereo mode.
+/// Set glasses to SBS stereo mode unconditionally.
+/// Avoids get_display_mode() which costs an extra run_command round-trip and
+/// accumulates McuPacket heap allocations in ar-drivers' pending_packets queue.
 fn switch_to_stereo(glasses: &mut Box<dyn ar_drivers::ARGlasses>) {
-    match glasses.get_display_mode() {
-        Ok(DisplayMode::Stereo | DisplayMode::HighRefreshRateSBS) => {
-            eprintln!("display: already in stereo mode");
-        }
-        Ok(mode) => {
-            eprintln!("display: in {mode:?} mode, switching to SBS stereo");
-            if let Err(e) = glasses.set_display_mode(DisplayMode::Stereo) {
-                eprintln!("display: failed to switch: {e}");
-            } else {
-                eprintln!("display: switched to SBS stereo");
-            }
-        }
-        Err(e) => eprintln!("display: failed to get mode: {e}"),
+    match glasses.set_display_mode(DisplayMode::Stereo) {
+        Ok(()) => eprintln!("display: set to SBS stereo"),
+        Err(e) => eprintln!("display: failed to set stereo: {e}"),
     }
 }
 
@@ -65,18 +57,18 @@ fn main() -> Result<()> {
     let osc_sender = osc::OscSender::new(&args.host, args.port)?;
     eprintln!("sending OSC to {}:{}", args.host, args.port);
 
-    // Face tracker listener
-    let ft = if args.ft_port > 0 {
-        Some(logger::FaceTracker::start(args.ft_port))
-    } else {
-        None
-    };
-
     let running = Arc::new(AtomicBool::new(true));
     let r = running.clone();
     ctrlc::set_handler(move || {
         r.store(false, Ordering::SeqCst);
     })?;
+
+    // Face tracker listener
+    let mut ft = if args.ft_port > 0 {
+        Some(logger::FaceTracker::start(args.ft_port, running.clone()))
+    } else {
+        None
+    };
 
     // Switch to SBS stereo on startup
     switch_to_stereo(&mut glasses);
@@ -101,13 +93,21 @@ fn main() -> Result<()> {
     let mut last_ft = [0.0f32; 4];
     let mut last_log = Instant::now();
 
-    while running.load(Ordering::Relaxed) {
+    // Consecutive error tracking for backoff + reconnect
+    let mut consec_errors: u32 = 0;
+    // After this many consecutive errors, log once and start sleeping
+    const ERR_LOG_THRESHOLD: u32 = 5;
+    // After this many, drop and reconnect the device
+    const ERR_RECONNECT_THRESHOLD: u32 = 20;
+
+    'main: while running.load(Ordering::Relaxed) {
         match glasses.read_event() {
             Ok(GlassesEvent::AccGyro {
                 accelerometer,
                 gyroscope,
                 ..
             }) => {
+                consec_errors = 0;
                 let gyro: [f32; 3] = gyroscope.into();
                 let accel: [f32; 3] = accelerometer.into();
 
@@ -153,17 +153,56 @@ fn main() -> Result<()> {
                 }
             }
             Ok(GlassesEvent::ProximityNear) => {
-                eprintln!("proximity: glasses put on — ensuring SBS stereo");
-                switch_to_stereo(&mut glasses);
+                consec_errors = 0;
+                eprintln!("proximity: glasses put on");
+                // No run_command here — set_display_mode blocks the IMU loop for up to 1s.
+                // Stereo mode is already set at startup and after reconnect.
             }
             Ok(GlassesEvent::Magnetometer { .. }) => {}
             Ok(_) => {}
             Err(e) => {
-                eprintln!("read error: {e}, retrying...");
+                consec_errors += 1;
+                if consec_errors == ERR_LOG_THRESHOLD {
+                    // Log once when errors begin (likely sleep/suspend)
+                    eprintln!("read error: {e} — device may be sleeping, waiting...");
+                }
+                if consec_errors >= ERR_RECONNECT_THRESHOLD {
+                    // Device is unresponsive — drop handle and reconnect
+                    eprintln!("device unresponsive after {consec_errors} errors — reconnecting...");
+                    drop(glasses);
+                    loop {
+                        if !running.load(Ordering::Relaxed) {
+                            break 'main;
+                        }
+                        std::thread::sleep(std::time::Duration::from_secs(2));
+                        match ar_drivers::any_glasses() {
+                            Ok(g) => {
+                                glasses = g;
+                                eprintln!("reconnected to {}", glasses.name());
+                                switch_to_stereo(&mut glasses);
+                                fuser.reset();
+                                consec_errors = 0;
+                                break;
+                            }
+                            Err(_) => {}
+                        }
+                    }
+                } else if consec_errors >= ERR_LOG_THRESHOLD {
+                    // Back off while sleeping — don't spin at 1000 Hz on errors
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                }
             }
         }
     }
 
+    // Flush CSV before exit so BufWriter doesn't silently drop buffered data
+    if let Some(ref mut w) = csv {
+        let _ = w.flush();
+    }
+    // Join facetracker thread — it will exit because running is now false
+    if let Some(ref mut ft) = ft {
+        ft.join();
+    }
     eprintln!("shutting down ({count} samples processed)");
     Ok(())
 }

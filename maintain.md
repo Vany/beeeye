@@ -1,2 +1,0 @@
-- https://www.reddit.com/r/ModdedMinecraft/comments/1qx52wv/minecraft_in_real_3d_minecraft_glasses_side_by/
-- https://modrinth.com/mod/beeeye

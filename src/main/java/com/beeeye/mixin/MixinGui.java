@@ -1,30 +1,42 @@
 package com.beeeye.mixin;
 
 import com.beeeye.StereoState;
-import net.minecraft.client.DeltaTracker;
+import com.mojang.blaze3d.pipeline.RenderPipeline;
 import net.minecraft.client.gui.Gui;
 import net.minecraft.client.gui.GuiGraphics;
+import net.minecraft.resources.Identifier;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
-import org.spongepowered.asm.mixin.injection.Inject;
-import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+import org.spongepowered.asm.mixin.injection.Redirect;
 
 /**
- * Suppress vanilla crosshair during stereo HUD capture.
+ * Suppress only the vanilla crosshair sprite during stereo HUD capture.
  * The crosshair is drawn separately per eye with convergence offset
  * during the compositing phase (see BodyCrosshair).
+ * The attack cooldown indicator (also inside renderCrosshair) is allowed
+ * through so it appears in the HUD.
  */
 @Mixin(Gui.class)
 public class MixinGui {
 
-    @Inject(method = "renderCrosshair", at = @At("HEAD"), cancellable = true)
-    private void beeeye$suppressCrosshair(
+    // Redirect only the crosshair sprite blit (ordinal=0) to a no-op in stereo HUD phase,
+    // letting the attack cooldown indicator blits (ordinal=1,2,3) render normally.
+    @Redirect(
+        method = "renderCrosshair",
+        at = @At(
+            value = "INVOKE",
+            target = "Lnet/minecraft/client/gui/GuiGraphics;blitSprite(Lcom/mojang/blaze3d/pipeline/RenderPipeline;Lnet/minecraft/resources/Identifier;IIII)V",
+            ordinal = 0
+        )
+    )
+    private void beeeye$suppressCrosshairSprite(
         GuiGraphics guiGraphics,
-        DeltaTracker deltaTracker,
-        CallbackInfo ci
+        RenderPipeline pipeline,
+        Identifier sprite,
+        int x, int y, int w, int h
     ) {
-        if (StereoState.isHudPhase()) {
-            ci.cancel();
+        if (!StereoState.isHudPhase()) {
+            guiGraphics.blitSprite(pipeline, sprite, x, y, w, h);
         }
     }
 }
