@@ -21,6 +21,7 @@ public class Beeeye {
     public static final String MOD_ID = "beeeye";
     public static final Logger LOGGER = LoggerFactory.getLogger(MOD_ID);
 
+    private static volatile boolean initialized = false;
     private static volatile boolean stereoEnabled = false;
     private static final OscListener oscListener = new OscListener();
 
@@ -29,6 +30,14 @@ public class Beeeye {
     }
 
     public Beeeye(IEventBus modEventBus, ModContainer modContainer) {
+        if (initialized) {
+            throw new IllegalStateException(
+                "[Beeeye] Duplicate mod instance detected! " +
+                "You have multiple Beeeye jars loaded simultaneously. " +
+                "Remove all but one Beeeye jar from your mods folder."
+            );
+        }
+        initialized = true;
         LOGGER.info("Beeeye initializing...");
 
         modContainer.registerConfig(ModConfig.Type.CLIENT, BeeeyeConfig.SPEC);
