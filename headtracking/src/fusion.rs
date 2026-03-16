@@ -15,6 +15,11 @@ const DEFAULT_DT: f64 = 0.001;
 // 0.02 per sample → ~1.2s time constant for full correction.
 const FT_CORRECTION_ALPHA: f64 = 0.02;
 
+// ZUPT (Zero-Velocity Update) — gyro bias estimation
+// When stationary, raw gyro = bias. EMA converges in ~1000 samples (~1s at 1kHz).
+const GYRO_STATIONARY_THRESH: f64 = 0.1; // rad/s (~6°/s) — below = stationary
+const BIAS_ALPHA: f64 = 0.001; // EMA weight per sample
+
 /// Output of the fusion system
 pub struct FusionOutput {
     /// Delta quaternion: rotation from calibrated neutral to current head orientation.
@@ -37,6 +42,9 @@ pub struct Fusion {
     // Face tracker reference pair (recorded on first FT sample)
     ft_calibrated: bool,
     ft_ref: UnitQuaternion<f64>, // FT orientation at calibration
+
+    // ZUPT gyro bias estimate (EMA, updated only when stationary)
+    bias: Vector3<f64>,
 }
 
 impl Fusion {
@@ -48,6 +56,7 @@ impl Fusion {
             neutral: UnitQuaternion::identity(),
             ft_calibrated: false,
             ft_ref: UnitQuaternion::identity(),
+            bias: Vector3::zeros(),
         }
     }
 
@@ -95,10 +104,18 @@ impl Fusion {
         self.last_time = Some(now);
 
         let gyro = Vector3::new(gyro[0] as f64, gyro[1] as f64, gyro[2] as f64);
-
-        // --- Mahony filter (KP only, no bias integration) ---
-        let mut error = Vector3::zeros();
         let a_norm = a.norm();
+
+        // ZUPT: when stationary, raw gyro ≈ bias. Estimate via EMA.
+        let stationary = gyro.norm() < GYRO_STATIONARY_THRESH
+            && (a_norm - GRAVITY).abs() < 1.0;
+        if stationary {
+            self.bias = self.bias * (1.0 - BIAS_ALPHA) + gyro * BIAS_ALPHA;
+        }
+        let gyro = gyro - self.bias;
+
+        // --- Mahony filter (KP only, long-term yaw drift handled by ZUPT + FT) ---
+        let mut error = Vector3::zeros();
         if (a_norm - GRAVITY).abs() < ACCEL_GATE && a_norm > 1e-6 {
             let q = self.q.quaternion();
             let sin_pitch = 2.0 * (q.w * q.i - q.j * q.k);

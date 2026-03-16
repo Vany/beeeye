@@ -170,7 +170,9 @@ public class HeadTracker {
 
         if (moving) {
             if (anchorYaw < dz && anchorPitch < dz) {
-                // Inside anchor dead zone — start or continue settle timer
+                // Inside anchor dead zone — start or continue settle timer.
+                // Do NOT update anchor here; hold it fixed so anchorDelta is
+                // measured against a stable reference, not a chasing one.
                 if (settleStartMs == 0) {
                     settleStartMs = System.currentTimeMillis();
                 } else if (
@@ -182,10 +184,11 @@ public class HeadTracker {
                     return anchor.mul(neutralInverse);
                 }
             } else {
-                // Still moving — reset settle timer, update anchor
+                // Outside dead zone — still moving. Reset settle timer and
+                // advance anchor so dead zone tracks the current trajectory.
                 settleStartMs = 0;
+                anchor = current;
             }
-            anchor = current;
             return delta;
         } else {
             // Stationary — check if moved beyond dead zone
