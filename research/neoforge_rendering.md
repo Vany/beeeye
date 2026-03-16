@@ -806,3 +806,39 @@ Critical information for users: connect glasses before launching Minecraft, veri
 #### 10.3.3 Community Feedback Integration for Iterative Improvement
 
 The Stereopsis mod's development history demonstrates value of user feedback, particularly for hardware-specific optimizations where developer testing is limited . Issue tracking, Discord communities, or forum threads provide channels for X-Real 2 users to report experience and suggest improvements. This feedback loop is essential for achieving quality comparable to native stereo applications .
+
+---
+
+## Section 11: Real-World GL State Findings (Beeeye Development)
+
+### 11.1 GL state that compositing must defend against
+
+Compositing runs at `GameRenderer.render()` TAIL, after all mod HUD overlays. Mods may leave arbitrary GL state dirty.
+
+**Safe to save/restore directly:**
+- `GL_SCISSOR_TEST` + box — `glBlitFramebuffer` and shader-based `blitAndBlendToTexture` both respect scissor
+- `GL_COLOR_CLEAR_VALUE` — `glClear()` (used by BodyCrosshair) respects clear color
+
+**DO NOT touch directly:**
+- `GL_COLOR_WRITEMASK` — NeoForge `RenderSystem` maintains an internal state cache for this. Calling `GL11.glColorMask()` bypasses the cache → cache desync → next eye render gets wrong color mask state from cache without re-issuing the GL call → eye rendering corruption (GUI desync, desynced eye compositing).
+- `GL_DRAW_FRAMEBUFFER_BINDING` — Restoring the saved FBO (which is `hudFbo`'s GL ID at TAIL time) leaves `hudFbo` as ambient draw target for subsequent frames → corrupts eye rendering.
+
+**Rule**: only save/restore state that raw GL compositing calls own (scissor, clear color). Leave RenderSystem-tracked state (colorMask, FBO bindings) entirely alone.
+
+### 11.2 Mistakes made
+
+After fixing the Sophisticated Storage scissor bug (bb80140), attempted to "harden" the compositing block by also saving/restoring `GL_COLOR_WRITEMASK` and `GL_DRAW_FRAMEBUFFER_BINDING`. Both caused regressions:
+
+- `GL11.glColorMask(true,true,true,true)` → NeoForge RenderSystem cache desync → eyes rendered with wrong state → GUI/world desync between eyes.
+- `GL30.glBindFramebuffer(GL30.GL_DRAW_FRAMEBUFFER, savedDrawFbo)` → restored `hudFbo` as draw target → corrupted subsequent frames.
+
+Attempted to diagnose the resulting flicker as a convergence asymmetry bug (Convergence.update() mid-loop) and made further changes that did not help. The root cause was always the GL state hardening overreach.
+
+**Correct state for compositing block**: save/restore only scissor and clear color. Nothing else.
+
+### 11.3 Mod-specific confirmed bugs
+
+| Mod | GL state left dirty | Manifestation | Fix |
+|-----|---------------------|---------------|-----|
+| Jade | `GL_SCISSOR_TEST`, `GL_COLOR_CLEAR_VALUE` alpha=1 | Black HUD / opaque black overlay | `glClearColor(0,0,0,0)` before HUD phase; disable scissor before blits |
+| Sophisticated Storage | `GL_SCISSOR_TEST` (item-list clip box) | Partial GUI blend (only item-list area) | Scissor stays OFF for entire compositing block including `blitAndBlendToTexture` |
