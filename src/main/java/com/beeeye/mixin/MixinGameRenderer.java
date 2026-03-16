@@ -14,11 +14,16 @@ import com.beeeye.StereoState;
 import com.beeeye.StereoState.Eye;
 import com.beeeye.StereoState.RenderPhase;
 import com.mojang.blaze3d.pipeline.RenderTarget;
+import com.mojang.blaze3d.resource.CrossFrameResourcePool;
+import com.mojang.blaze3d.resource.GraphicsResourceAllocator;
 import net.minecraft.client.Camera;
 import net.minecraft.client.DeltaTracker;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.GameRenderer;
 import net.minecraft.client.renderer.GlobalSettingsUniform;
+import net.minecraft.client.renderer.LevelTargetBundle;
+import net.minecraft.client.renderer.PostChain;
+import net.minecraft.resources.Identifier;
 import net.minecraft.world.entity.EntitySelector;
 import net.minecraft.world.entity.projectile.ProjectileUtil;
 import net.minecraft.world.level.ClipContext;
@@ -34,6 +39,7 @@ import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.Redirect;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 /**
@@ -61,11 +67,12 @@ public abstract class MixinGameRenderer {
     @Shadow
     public abstract void updateCamera(DeltaTracker deltaTracker);
 
-    @Unique
-    private boolean beeeye$inStereoRender = false;
+    @Shadow private Identifier postEffectId;
+    @Shadow private boolean effectActive;
+    @Shadow @Final private CrossFrameResourcePool resourcePool;
 
-    @Unique
-    private boolean beeeye$stereoReady = false;
+    @Unique private boolean beeeye$inStereoRender = false;
+    @Unique private boolean beeeye$stereoReady = false;
 
     // =========================================================================
     // Render pipeline
@@ -122,9 +129,7 @@ public abstract class MixinGameRenderer {
         int leftTex = GlTextureUtil.textureId(leftFbo.getColorTexture());
         int rightTex = GlTextureUtil.textureId(rightFbo.getColorTexture());
         int hudTex = GlTextureUtil.textureId(hudFbo.getColorTexture());
-        int compositeTex = GlTextureUtil.textureId(
-            compositeRT.getColorTexture()
-        );
+        int compositeTex = GlTextureUtil.textureId(compositeRT.getColorTexture());
         if (
             mainTex <= 0 ||
             leftTex <= 0 ||
@@ -144,6 +149,11 @@ public abstract class MixinGameRenderer {
         BlitRect leftHalf = eye;
         BlitRect rightHalf = BlitRect.region(halfW, 0, halfW, fullH);
 
+        // Mods (e.g. Jade) may leave GL_SCISSOR_TEST enabled after HUD rendering.
+        // glBlitFramebuffer respects scissor and would clip or discard our blits.
+        boolean scissorWasEnabled = GL11.glIsEnabled(GL11.GL_SCISSOR_TEST);
+        if (scissorWasEnabled) GL11.glDisable(GL11.GL_SCISSOR_TEST);
+
         // Eyes -> main target halves
         beeeye$blit(leftGl, mainGl, eye, leftHalf);
         beeeye$blit(rightGl, mainGl, eye, rightHalf);
@@ -152,6 +162,8 @@ public abstract class MixinGameRenderer {
         StereoRenderer.clearFbo(compositeRT);
         beeeye$blit(hudGl, compositeGl, eye, leftHalf);
         beeeye$blit(hudGl, compositeGl, eye, rightHalf);
+
+        if (scissorWasEnabled) GL11.glEnable(GL11.GL_SCISSOR_TEST);
 
         // Alpha-blend composite (HUD) onto main target
         GL30.glBindFramebuffer(GL30.GL_FRAMEBUFFER, 0);
@@ -166,6 +178,29 @@ public abstract class MixinGameRenderer {
         }
 
         StereoState.setPhase(RenderPhase.INACTIVE);
+    }
+
+    /**
+     * Redirect the vanilla postEffect call in render(). When stereo is active, we've already
+     * applied the effect per-eye on the eye FBOs during EYE_RENDER. The vanilla call runs
+     * after renderLevel() at which point getMainRenderTarget()=hudFbo, so it would corrupt
+     * hudFbo with opaque pixels. Skip it when stereoReady (= stereo frame was processed).
+     */
+    @Redirect(
+        method = "render",
+        at = @At(
+            value = "INVOKE",
+            target = "Lnet/minecraft/client/renderer/PostChain;process(Lcom/mojang/blaze3d/pipeline/RenderTarget;Lcom/mojang/blaze3d/resource/GraphicsResourceAllocator;)V"
+        )
+    )
+    private void beeeye$redirectPostEffect(
+        PostChain postchain, RenderTarget target, GraphicsResourceAllocator allocator
+    ) {
+        if (!beeeye$stereoReady) {
+            // Non-stereo: run normally
+            postchain.process(target, allocator);
+        }
+        // Stereo: already processed per-eye — skip to avoid corrupting hudFbo
     }
 
     // =========================================================================
@@ -200,10 +235,29 @@ public abstract class MixinGameRenderer {
 
             beeeye$refreshGlobalUniforms(deltaTracker);
             renderLevel(deltaTracker);
+            minecraft.levelRenderer.doEntityOutline();
+            // Post-processing effects (night vision, nausea, creeper outline, etc.) per eye.
+            // Vanilla GameRenderer runs this after renderLevel() returns, at which point we're
+            // in HUD_CAPTURE and getMainRenderTarget()=hudFbo — the effect would corrupt hudFbo
+            // with opaque scene-derived pixels. We run it here per-eye on the correct eye FBO,
+            // and cancel the vanilla call via @Redirect below.
+            if (postEffectId != null && effectActive) {
+                PostChain postchain = minecraft.getShaderManager().getPostChain(
+                    postEffectId, LevelTargetBundle.MAIN_TARGETS
+                );
+                if (postchain != null) {
+                    postchain.process(StereoState.getCurrentEyeFbo(), resourcePool);
+                }
+            }
         }
 
         StereoState.setCurrentEye(null);
         StereoRenderer.clearFbo(StereoRenderer.getHudFbo());
+        // Force transparent GL clear color before HUD phase. Mods like Jade call glClear()
+        // on the HUD FBO (via getMainRenderTarget() redirect) using whatever the current
+        // GL clear color is. If alpha=1, hudFbo becomes opaque black and wipes the stereo
+        // world when composited. Setting (0,0,0,0) here ensures any such clear is transparent.
+        GL11.glClearColor(0, 0, 0, 0);
         beeeye$stereoReady = true;
         StereoState.setPhase(RenderPhase.HUD_CAPTURE);
     }
