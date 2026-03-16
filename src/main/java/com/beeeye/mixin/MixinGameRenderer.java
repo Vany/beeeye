@@ -163,11 +163,15 @@ public abstract class MixinGameRenderer {
         beeeye$blit(hudGl, compositeGl, eye, leftHalf);
         beeeye$blit(hudGl, compositeGl, eye, rightHalf);
 
-        if (scissorWasEnabled) GL11.glEnable(GL11.GL_SCISSOR_TEST);
-
-        // Alpha-blend composite (HUD) onto main target
+        // Alpha-blend composite (HUD) onto main target.
+        // Scissor must stay OFF here — blitAndBlendToTexture uses a shader that
+        // respects GL_SCISSOR_TEST, so any active scissor (e.g. SS item-list clip)
+        // would mask out the portions of the HUD blend that fall outside the box.
         GL30.glBindFramebuffer(GL30.GL_FRAMEBUFFER, 0);
         compositeRT.blitAndBlendToTexture(mainTarget.getColorTextureView());
+
+        // Restore scissor only after all compositing is done.
+        if (scissorWasEnabled) GL11.glEnable(GL11.GL_SCISSOR_TEST);
 
         // Convergence-offset crosshair (replaces vanilla crosshair suppressed by MixinGui)
         BodyCrosshair.drawConvergenceCrosshair(mainGl, fullW, fullH);
@@ -258,6 +262,9 @@ public abstract class MixinGameRenderer {
         // GL clear color is. If alpha=1, hudFbo becomes opaque black and wipes the stereo
         // world when composited. Setting (0,0,0,0) here ensures any such clear is transparent.
         GL11.glClearColor(0, 0, 0, 0);
+        // Reset scissor before HUD phase. EYE_RENDER or a mod may have left GL_SCISSOR_TEST
+        // enabled, which would clip GUI rendering in HUD_CAPTURE.
+        if (GL11.glIsEnabled(GL11.GL_SCISSOR_TEST)) GL11.glDisable(GL11.GL_SCISSOR_TEST);
         beeeye$stereoReady = true;
         StereoState.setPhase(RenderPhase.HUD_CAPTURE);
     }

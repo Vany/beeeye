@@ -2,9 +2,10 @@
 
 ### Current Implementation: Off-Axis Projection Stereo + HUD Alpha Compositing
 
-**Status**: v1.1.0. Config-driven IPD and convergence. HUD alpha composited to both eyes.
+**Status**: v1.1.2. Config-driven IPD and convergence. HUD alpha composited to both eyes.
 Head tracking via OSC with raw passthrough and dual dead zone (100ms anchor settle).
 Head-tracked interaction picking. Stereo mouse on both halves.
+Duplicate instance detection (static flag in constructor → IllegalStateException).
 
 #### Stereo Approaches Tried
 
@@ -166,6 +167,36 @@ when changed via `/beeeye set` or config UI. Call `SPEC.save()` after `ConfigVal
 - **ValidationGpuTexture**: NeoForge wraps textures; unwrap via `getRealTexture()` → `glId()`
 - **Temp GL FBOs**: Created per-frame in render TAIL to wrap RenderTarget textures for glBlitFramebuffer
 
+#### Recent Fixes (v1.1.2)
+
+- **MixinLevelRenderer not registered**: The class existed but was missing from `beeeye.mixins.json`.
+  `doEntityOutline()` cancel during HUD_CAPTURE was never running. Now registered.
+- **Anchor drift bug**: `anchor = current` ran unconditionally inside the `moving` block, including
+  inside the dead zone. The anchor chased the head → anchorDelta always near zero → settle timer
+  never fired. Fixed: anchor only advances when OUTSIDE the dead zone.
+- **ZUPT gyro bias** (fusion.rs): When stationary, raw gyro ≈ bias. EMA estimate (α=0.001)
+  subtracted each sample. Thresholds: gyro < 0.1 rad/s AND |accel_norm - 9.81| < 1 m/s².
+- **Jade black screen** (v1.1.2): Jade called `glClear()` via `getMainRenderTarget()` redirect
+  during HUD_CAPTURE with default clear color (alpha=1) → opaque black hudFbo → wipes world.
+  Fix: `GL11.glClearColor(0,0,0,0)` before HUD phase so any mod's glClear is transparent.
+  Also: `GL_SCISSOR_TEST` left enabled by mods corrupted `glBlitFramebuffer` compositing —
+  save/restore scissor state around all blits in render TAIL.
+
+#### Sophisticated Storage multi-pass rendering (FIXED)
+
+**Root cause**: SS enables `GL_SCISSOR_TEST` for its scrollable item list (clips rendering
+to the list area) and never disables it before returning from `Screen.render()`. Our compositing
+code correctly disabled scissor for `glBlitFramebuffer`, but then **re-enabled it before
+`blitAndBlendToTexture`**. That shader respects GL scissor, so only the portion of hudFbo
+within SS's item-list box got blended onto the screen — the rest was clipped.
+
+**Why tooltip fixed it**: `GuiGraphics.disableScissor()` inside tooltip rendering popped SS's
+scissor off the stack and disabled `GL_SCISSOR_TEST` before compositing ran.
+
+**Fix**: moved `if (scissorWasEnabled) GL11.glEnable(GL11.GL_SCISSOR_TEST)` to AFTER
+`compositeRT.blitAndBlendToTexture()`. Also added defensive scissor disable at HUD_CAPTURE
+entry (in case EYE_RENDER ever leaves scissor enabled).
+
 #### Testing Checklist
 
 - [x] Toggle stereo with `\` key (backslash)
@@ -183,3 +214,6 @@ when changed via `/beeeye set` or config UI. Call `SPEC.save()` after `ConfigVal
 - [x] Stereo disabled on world quit (ClientPlayerNetworkEvent.LoggingOut)
 - [x] Head tracking via OSC with anchored dead zone
 - [x] Mouse works on both eye halves in GUI/crafting
+- [x] Jade / HUD mods: no black screen (glClearColor transparent before HUD phase)
+- [x] Entity outlines: doEntityOutline() runs per-eye, cancelled in HUD_CAPTURE
+- [x] Sophisticated Storage: full GUI renders without tooltip
