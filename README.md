@@ -177,7 +177,12 @@ This matches how professional 3D cinema and VR systems work.
 
 ## Compatibility
 
-Works with most mods. Tested with JourneyMap.
+Works with most mods. Tested with:
+- JourneyMap
+- Sophisticated Storage
+- Jade
+
+If a mod leaves `GL_SCISSOR_TEST` enabled after rendering, Beeeye saves and restores the scissor state around its compositing block — your HUD will render correctly regardless.
 
 ## License
 

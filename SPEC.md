@@ -1,10 +1,10 @@
 # Beeeye Mod Specification
 ## Stereo Rendering for Minecraft
 
-**Mod ID:** `beeeye`  
-**Mod Name:** Beeeye  
-**Version:** 1.1.0  
-**Minecraft Version:** 1.21.1  
+**Mod ID:** `beeeye`
+**Mod Name:** Beeeye
+**Version:** 1.1.2
+**Minecraft Version:** 1.21.11
 **Mod Loader:** NeoForge  
 **Package:** `com.beeeye`
 
@@ -402,6 +402,7 @@ beeeye/
 │       ├── MixinMinecraft.java      # Render target redirect during HUD
 │       ├── MixinWindow.java         # Phase-gated width faking
 │       ├── MixinGui.java            # Suppress crosshair during HUD capture
+│       ├── MixinLevelRenderer.java  # Cancel doEntityOutline during HUD capture
 │       └── MixinMouseHandler.java   # Both-eye mouse translation
 └── src/main/resources/
     ├── META-INF/neoforge.mods.toml
@@ -426,6 +427,6 @@ beeeye/
 ./gradlew build
 ```
 
-Output: `build/libs/beeeye-1.1.0.jar`
+Output: `build/libs/beeeye-1.1.2.jar`
 
-Install: Copy JAR to `.minecraft/mods/` with NeoForge 1.21.1
+Install: Copy JAR to `.minecraft/mods/` with NeoForge 1.21.11

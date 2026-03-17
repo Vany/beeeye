@@ -197,6 +197,27 @@ scissor off the stack and disabled `GL_SCISSOR_TEST` before compositing ran.
 `compositeRT.blitAndBlendToTexture()`. Also added defensive scissor disable at HUD_CAPTURE
 entry (in case EYE_RENDER ever leaves scissor enabled).
 
+#### GL State Hardening: What Went Wrong
+
+Attempted to save/restore more GL state around the compositing block. Two additions broke stereo:
+
+1. **`GL11.glColorMask(true, true, true, true)`** — bypasses NeoForge's `RenderSystem` state tracker.
+   NeoForge caches the color mask; calling raw GL changes GPU state without updating the cache.
+   Subsequent NeoForge draw calls that depend on the cached value produce wrong output — in this
+   case, per-eye rendering became desynchronised (one eye rendered with wrong color write mask).
+
+2. **`savedDrawFbo` save/restore** — restoring the "previous" draw FBO after compositing put
+   `hudFbo`'s GL ID back as the current draw target. Anything drawn next went into hudFbo instead
+   of the main target.
+
+**Rule**: compositing block ONLY saves/restores `GL_SCISSOR_TEST` + scissor box coords + `GL_COLOR_CLEAR_VALUE`.
+Do NOT touch `GL_COLOR_WRITEMASK` or `GL_DRAW_FRAMEBUFFER_BINDING` with raw GL calls.
+FBO binding and color mask go through `RenderSystem`; raw GL calls desync its cache and corrupt rendering.
+
+Tried to fix painting flicker by deferring `Convergence.update()` to after the eye loop.
+**That was the wrong diagnosis.** Reverting to bb80140 (clean state before GL hardening attempt) fixed it.
+Lesson: when reverting is the right move, just revert — don't keep patching on top of broken state.
+
 #### Testing Checklist
 
 - [x] Toggle stereo with `\` key (backslash)
