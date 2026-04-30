@@ -99,18 +99,16 @@ public class Beeeye {
                             drift.toPitch()
                         );
                     }
-                    mc.player.displayClientMessage(
+                    mc.gui.setOverlayMessage(
                         Component.literal(msg),
-                        true
+                        false
                     );
                 }
             } else {
-                if (mc.player != null) {
-                    mc.player.displayClientMessage(
-                        Component.literal("Beeeye OFF"),
-                        true
-                    );
-                }
+                mc.gui.setOverlayMessage(
+                    Component.literal("Beeeye OFF"),
+                    false
+                );
                 StereoRenderer.cleanup();
             }
         }

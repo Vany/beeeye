@@ -360,9 +360,9 @@ public abstract class MixinGameRenderer {
             minecraft.level == null ? 0L : minecraft.level.getGameTime(),
             deltaTracker,
             minecraft.options.getMenuBackgroundBlurriness(),
-            mainCamera,
+            mainCamera.position(),
             minecraft.options.textureFiltering().get() ==
-                net.minecraft.client.TextureFilteringMethod.ANISOTROPIC
+                net.minecraft.client.TextureFilteringMethod.RGSS
         );
     }
 }

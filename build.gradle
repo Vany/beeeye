@@ -1,7 +1,7 @@
 plugins {
     id 'java-library'
     id 'idea'
-    id 'net.neoforged.moddev' version '2.0.140'
+    id 'net.neoforged.moddev' version '2.0.141'
 }
 
 version = mod_version
@@ -11,16 +11,10 @@ base {
     archivesName = mod_id
 }
 
-java.toolchain.languageVersion = JavaLanguageVersion.of(21)
+java.toolchain.languageVersion = JavaLanguageVersion.of(25)
 
 neoForge {
     version = neo_version
-
-    // Temporarily disable parchment due to NeoForm zip issue
-    // parchment {
-    //     mappingsVersion = parchment_mappings_version
-    //     minecraftVersion = parchment_minecraft_version
-    // }
 
     runs {
         client {
@@ -44,10 +38,6 @@ neoForge {
 
 repositories {
     mavenLocal()
-    maven {
-        name = 'ParchmentMC'
-        url = 'https://maven.parchmentmc.org'
-    }
 }
 
 dependencies {

@@ -2,7 +2,7 @@
 
 ### Current Implementation: Off-Axis Projection Stereo + HUD Alpha Compositing
 
-**Status**: v1.1.2. Config-driven IPD and convergence. HUD alpha composited to both eyes.
+**Status**: v1.2.0. Ported to Minecraft 26.1.2 / NeoForge 26.1.2.30-beta / Java 25 / Gradle 9.1.0. Config-driven IPD and convergence. HUD alpha composited to both eyes.
 Head tracking via OSC with raw passthrough and dual dead zone (100ms anchor settle).
 Head-tracked interaction picking. Stereo mouse on both halves.
 Duplicate instance detection (static flag in constructor → IllegalStateException).
@@ -238,3 +238,28 @@ Lesson: when reverting is the right move, just revert — don't keep patching on
 - [x] Jade / HUD mods: no black screen (glClearColor transparent before HUD phase)
 - [x] Entity outlines: doEntityOutline() runs per-eye, cancelled in HUD_CAPTURE
 - [x] Sophisticated Storage: full GUI renders without tooltip
+
+#### MC 26.1.2 Migration (v1.2.0)
+
+API changes encountered porting from 1.21.11 → 26.1.2:
+
+1. **`GuiGraphics` → `GuiGraphicsExtractor`** (`net.minecraft.client.gui`). The HUD rendering
+   pipeline now uses an "extract render state" pattern. All blitSprite calls moved to
+   `GuiGraphicsExtractor`. `Gui.renderCrosshair()` renamed to `Gui.extractCrosshair()` (private).
+
+2. **`GlobalSettingsUniform.update()` last camera param changed**: `Camera` → `Vec3`.
+   Use `mainCamera.position()` instead of the camera object directly.
+
+3. **`Camera.getPosition()` → `Camera.position()`** — getter renamed to plain accessor.
+
+4. **`LocalPlayer.displayClientMessage(Component, boolean)` removed** — Action bar display
+   now via `Minecraft.gui.setOverlayMessage(Component, boolean)`.
+
+Build toolchain changes:
+- Minecraft: `1.21.11` → `26.1.2` (Mojang switched to year.release versioning)
+- NeoForge: `21.11.38-beta` → `26.1.2.30-beta`
+- Java: 21 → 25
+- Gradle: 8.10.2 → 9.1.0 (foojay toolchain plugin removed — Java 25 provided by PrismLauncher)
+- ModDevGradle plugin: 2.0.140 → 2.0.141
+- Parchment removed — Mojang now ships unobfuscated source
+- Install target: `VanyLLa3d` → `ATM11` (All the Mods 11 pack)

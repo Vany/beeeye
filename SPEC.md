@@ -3,8 +3,8 @@
 
 **Mod ID:** `beeeye`
 **Mod Name:** Beeeye
-**Version:** 1.1.2
-**Minecraft Version:** 1.21.11
+**Version:** 1.2.0
+**Minecraft Version:** 26.1.2
 **Mod Loader:** NeoForge  
 **Package:** `com.beeeye`
 
@@ -427,6 +427,6 @@ beeeye/
 ./gradlew build
 ```
 
-Output: `build/libs/beeeye-1.1.2.jar`
+Output: `build/libs/beeeye-1.2.0.jar`
 
-Install: Copy JAR to `.minecraft/mods/` with NeoForge 1.21.11
+Install: Copy JAR to `.minecraft/mods/` with NeoForge 26.1.2 (tested with ATM11 instance)
