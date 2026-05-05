@@ -15,7 +15,7 @@ public class GlFboCache {
         LEFT,
         RIGHT,
         HUD,
-        COMPOSITE,
+        HUD_RIGHT,
     }
 
     private static final int COUNT = Slot.values().length;

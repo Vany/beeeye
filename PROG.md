@@ -10,3 +10,5 @@
 - Before adding features, check existing open-source for equivalent functionality.
 - When fixing a bug, search for the same condition elsewhere and fix all instances.
 - Add sufficient debug logging during development; strip it for release.
+- After two unsuccessful fix attempts, continue attempting fixes but assume further attempts may also fail, and significantly increase trace logging at key execution points to capture real runtime behavior and guide subsequent changes.
+- do not guess the api when documentation exists, read it.

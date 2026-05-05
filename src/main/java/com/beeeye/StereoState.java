@@ -7,7 +7,10 @@ import com.mojang.blaze3d.pipeline.RenderTarget;
  * No physics math here; see {@link StereoPerspective} for projection/eye offset.
  *
  * Render phases (driven by MixinGameRenderer):
- *   {@link RenderPhase#EYE_RENDER} — each eye renders to half-width FBO.
+ *   {@link RenderPhase#HUD_EXTRACT} — entire GameRenderer.extract() call.
+ *       MixinWindow halves getWidth() so all mod extraction code sees half-width,
+ *       ensuring GUI elements are positioned for the per-eye canvas (not the full screen).
+ *   {@link RenderPhase#EYE_RENDER} — each eye renders to its half-width FBO.
  *   {@link RenderPhase#HUD_CAPTURE} — HUD draws into half-width hudFbo.
  *   {@link RenderPhase#COMPOSITING} — eye FBOs blitted to main target halves,
  *       HUD alpha-composited onto both halves identically.
@@ -28,6 +31,7 @@ public class StereoState {
 
     public enum RenderPhase {
         INACTIVE,
+        HUD_EXTRACT,  // entire GameRenderer.extract() — getWidth() returns half so mods lay out for one eye
         EYE_RENDER,
         HUD_CAPTURE,
         COMPOSITING,
@@ -47,10 +51,6 @@ public class StereoState {
 
     public static void setPhase(RenderPhase p) {
         phase = p;
-    }
-
-    public static boolean isInStereoPass() {
-        return phase == RenderPhase.EYE_RENDER;
     }
 
     public static boolean isRenderingEye() {

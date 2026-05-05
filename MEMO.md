@@ -29,24 +29,38 @@ Duplicate instance detection (static flag in constructor → IllegalStateExcepti
 3. **Copy left half to right** (failed): Overwrites right-eye world
 4. **Render HUD only on left eye** (partial): Only left half of HUD visible, no right eye
 
-5. **Alpha compositing via blitAndBlendToTexture** (current):
-   - Redirect render target to half-width hudFbo during HUD phase
-   - Fake all window width methods to half (MixinWindow)
-   - After HUD drawn: restore stereo world, alpha-blend HUD onto both halves
-   - Uses ENTITY_OUTLINE_BLIT pipeline (SRC_ALPHA, ONE_MINUS_SRC_ALPHA)
-   - Full-width composite buffer as intermediary for blitAndBlendToTexture
+5. **Transparent hudFbo alpha compositing** (FAILED — root cause found):
+   - Redirect render target to half-width transparent hudFbo during HUD phase
+   - GuiRenderer.render(fogBuffer) contains a full-screen fog/vignette pass
+   - This pass assumes an already-opaque world background (normal flow: renders on top of world)
+   - On transparent hudFbo: fog pass outputs 0,0,0,255 (opaque black) for all non-HUD pixels
+   - Confirmed by pixel traces: after clearFboViaPass (0,0,0,0 ✓), after GuiRenderer (0,0,0,255 ✗)
+   - Blitting this opaque black hudFbo over correct eye content destroys both eyes
+
+6. **Opaque eye background** (CURRENT — working architecture):
+   - After eye renders, pre-composite both eyes to main immediately (compositeEyes)
+   - Copy left eye → hudFbo as opaque background (initHudBackground)
+   - GuiRenderer.render() renders to hudFbo (fog pass now correct — opaque background)
+   - hudFbo = leftEye + HUD (correctly composited by GuiRenderer's own pipeline)
+   - composite(): blit hudFbo → main left half (replaces bare leftEye with leftEye+HUD)
+   - Right half = rightEye only (no HUD overlay — future work: HUD mirroring via delta shader)
 
 #### Architecture
 
-**Rendering pipeline** (8-step plan from TODO.md):
-1. Render left and right eyes into raw GL FBOs (MixinGameRenderer, renderLevel HEAD)
-2. Clear hudFbo to transparent
-3. Enable HUD phase — fake width to half, redirect render target to hudFbo
-4. Minecraft and mods draw HUD onto half-width transparent hudFbo
-5. HUD phase ends (render TAIL)
-6. Restore stereo world: left eye → left half, right eye → right half of main target
-7. Alpha-composite HUD onto left eye (composite buffer + blitAndBlendToTexture)
-8. Alpha-composite HUD onto right eye (composite buffer + blitAndBlendToTexture)
+**Rendering pipeline** (current v1.2.0):
+1. Render left eye world → leftEyeFbo (half-width)
+2. Render right eye world → rightEyeFbo (half-width)
+3. Pre-composite: blit leftEye → main[0..halfW], rightEye → main[halfW..fullW]
+4. Copy leftEye → hudFbo (opaque background for GuiRenderer)
+5. Enable HUD_CAPTURE: redirect getMainRenderTarget() → hudFbo
+6. GuiRenderer.render() draws HUD onto hudFbo (fog/vignette + HUD on opaque leftEye bg)
+7. COMPOSITING: blit hudFbo → main[0..halfW] (left half gets leftEye+HUD)
+8. Right half keeps rightEye from step 3 (no HUD — future work)
+9. Draw convergence crosshair and body crosshair onto main
+
+**Why step 4 is required**: GuiRenderer always renders a full-screen fog/vignette pass
+before HUD elements. On transparent background this produces opaque black everywhere.
+On opaque leftEye background it composites correctly.
 
 **Projection shift** (MixinProjectionMatrix):
 - Hooks `getProjectionMatrix(float fov)` at RETURN

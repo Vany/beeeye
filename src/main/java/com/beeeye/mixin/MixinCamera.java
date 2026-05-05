@@ -5,8 +5,7 @@ import com.beeeye.HeadTracker;
 import com.beeeye.StereoPerspective;
 import com.beeeye.StereoState;
 import net.minecraft.client.Camera;
-import net.minecraft.world.entity.Entity;
-import net.minecraft.world.level.Level;
+import net.minecraft.client.DeltaTracker;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.injection.At;
@@ -37,22 +36,17 @@ public abstract class MixinCamera {
     @Shadow
     private float yRot;
 
-    @Inject(method = "setup", at = @At("TAIL"))
+    @Inject(method = "update", at = @At("TAIL"))
     private void beeeye$applyEyeOffset(
-        Level level,
-        Entity entity,
-        boolean detached,
-        boolean thirdPersonReverse,
-        float partialTick,
+        DeltaTracker deltaTracker,
         CallbackInfo ci
     ) {
         // Head tracking: only in stereo mode.
-        // Snapshot dead zone state machine once on LEFT pass; RIGHT pass reuses cached result.
+        // Snapshot dead zone state machine once per frame on LEFT eye only.
+        // Do NOT snapshot when eye==null: camera.update() is called during extract()
+        // (HUD_EXTRACT phase, eye==null) and would produce a double-snapshot.
         if (Beeeye.isStereoEnabled() && HeadTracker.isActive()) {
-            if (
-                StereoState.getCurrentEye() == StereoState.Eye.LEFT ||
-                StereoState.getCurrentEye() == null
-            ) {
+            if (StereoState.getCurrentEye() == StereoState.Eye.LEFT) {
                 HeadTracker.snapshotDelta();
             }
             HeadTracker.Quat delta = HeadTracker.getFrameDelta();
@@ -63,7 +57,7 @@ public abstract class MixinCamera {
         }
 
         // Stereo eye offset
-        if (!Beeeye.isStereoEnabled() || !StereoState.isInStereoPass()) return;
+        if (!Beeeye.isStereoEnabled() || !StereoState.isRenderingEye()) return;
 
         float offset = StereoPerspective.eyeOffset();
         if (offset != 0) {

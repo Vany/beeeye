@@ -1,6 +1,6 @@
 package com.beeeye.mixin;
 
-import com.beeeye.StereoState;
+import com.beeeye.Beeeye;
 import com.mojang.blaze3d.pipeline.RenderPipeline;
 import net.minecraft.client.gui.Gui;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
@@ -10,11 +10,11 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Redirect;
 
 /**
- * Suppress only the vanilla crosshair sprite during stereo HUD capture.
- * The crosshair is drawn separately per eye with convergence offset
- * during the compositing phase (see BodyCrosshair).
- * The attack cooldown indicator (also inside extractCrosshair) is allowed
- * through so it appears in the HUD.
+ * Suppress the vanilla crosshair sprite whenever stereo is active.
+ * In MC 26.1.2, extractCrosshair() runs during GameRenderer.extract() —
+ * before our HUD_CAPTURE phase begins — so a phase-based check never fires.
+ * The crosshair is replaced by BodyCrosshair.drawConvergenceCrosshair().
+ * The attack cooldown indicator (ordinals 1-3) is not affected.
  */
 @Mixin(Gui.class)
 public class MixinGui {
@@ -35,7 +35,7 @@ public class MixinGui {
         Identifier sprite,
         int x, int y, int w, int h
     ) {
-        if (!StereoState.isHudPhase()) {
+        if (!Beeeye.isStereoEnabled()) {
             guiGraphics.blitSprite(pipeline, sprite, x, y, w, h);
         }
     }

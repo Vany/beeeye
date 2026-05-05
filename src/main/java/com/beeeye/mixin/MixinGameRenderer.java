@@ -2,37 +2,28 @@ package com.beeeye.mixin;
 
 import com.beeeye.Beeeye;
 import com.beeeye.BinocularPicker;
-import com.beeeye.BodyCrosshair;
 import com.beeeye.Convergence;
-import com.beeeye.GlFboCache;
-import com.beeeye.GlFboCache.Slot;
-import com.beeeye.GlTextureUtil;
 import com.beeeye.HeadTracker;
 import com.beeeye.StereoRenderer;
-import com.beeeye.StereoRenderer.BlitRect;
 import com.beeeye.StereoState;
 import com.beeeye.StereoState.Eye;
 import com.beeeye.StereoState.RenderPhase;
+import com.mojang.blaze3d.buffers.GpuBufferSlice;
 import com.mojang.blaze3d.pipeline.RenderTarget;
 import com.mojang.blaze3d.resource.CrossFrameResourcePool;
 import com.mojang.blaze3d.resource.GraphicsResourceAllocator;
 import net.minecraft.client.Camera;
 import net.minecraft.client.DeltaTracker;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.render.GuiRenderer;
 import net.minecraft.client.renderer.GameRenderer;
 import net.minecraft.client.renderer.GlobalSettingsUniform;
 import net.minecraft.client.renderer.LevelTargetBundle;
 import net.minecraft.client.renderer.PostChain;
+import net.minecraft.client.renderer.state.GameRenderState;
+import net.minecraft.client.renderer.state.level.CameraRenderState;
 import net.minecraft.resources.Identifier;
-import net.minecraft.world.entity.EntitySelector;
-import net.minecraft.world.entity.projectile.ProjectileUtil;
-import net.minecraft.world.level.ClipContext;
-import net.minecraft.world.phys.AABB;
-import net.minecraft.world.phys.EntityHitResult;
-import net.minecraft.world.phys.HitResult;
-import net.minecraft.world.phys.Vec3;
 import org.lwjgl.opengl.GL11;
-import org.lwjgl.opengl.GL30;
 import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
@@ -65,7 +56,7 @@ public abstract class MixinGameRenderer {
     public abstract void renderLevel(DeltaTracker deltaTracker);
 
     @Shadow
-    public abstract void updateCamera(DeltaTracker deltaTracker);
+    public abstract GameRenderState getGameRenderState();
 
     @Shadow private Identifier postEffectId;
     @Shadow private boolean effectActive;
@@ -73,10 +64,66 @@ public abstract class MixinGameRenderer {
 
     @Unique private boolean beeeye$inStereoRender = false;
     @Unique private boolean beeeye$stereoReady = false;
+    @Unique private int beeeye$dbgGuiFrame = 0;
+    @Unique private static final int DBG_GUI_FIRST = 3;   // always log first N GUI renders
+    @Unique private static final int DBG_GUI_INTERVAL = 60;
 
     // =========================================================================
     // Render pipeline
     // =========================================================================
+
+    /**
+     * Covers the entire extract() call with HUD_EXTRACT so that window.getWidth() returns
+     * half-width for ALL mod extraction code, not just inside extractGui().
+     *
+     * extractWindow() inside extract() will now capture windowRenderState.width = 960 (half).
+     * A @Redirect on the resize() call in render() doubles it back for mainRenderTarget resize.
+     * beeeye$redirectGuiRender no longer needs to halve windowState.width (already 960).
+     */
+    @Inject(method = "extract", at = @At("HEAD"))
+    private void beeeye$onExtractHead(
+        DeltaTracker deltaTracker,
+        boolean advanceGameTime,
+        CallbackInfo ci
+    ) {
+        if (Beeeye.isStereoEnabled()) {
+            StereoState.setPhase(RenderPhase.HUD_EXTRACT);
+        }
+    }
+
+    @Inject(method = "extract", at = @At("TAIL"))
+    private void beeeye$onExtractTail(
+        DeltaTracker deltaTracker,
+        boolean advanceGameTime,
+        CallbackInfo ci
+    ) {
+        // Phase-based check, not stereo-enabled check: if stereo is toggled off between
+        // HEAD and TAIL of extract(), isStereoEnabled() would be false and phase would
+        // stay stuck at HUD_EXTRACT. Always reset if we set it.
+        if (StereoState.getPhase() == RenderPhase.HUD_EXTRACT) {
+            StereoState.setPhase(RenderPhase.INACTIVE);
+        }
+    }
+
+    /**
+     * When stereo is active, windowRenderState.width is 960 (halved by extractWindow via
+     * getWidth() during HUD_EXTRACT). The resize path in render() must use the real
+     * framebuffer width (1920), so double it back here.
+     */
+    @Redirect(
+        method = "render",
+        at = @At(
+            value = "INVOKE",
+            target = "Lnet/minecraft/client/renderer/GameRenderer;resize(II)V"
+        )
+    )
+    private void beeeye$redirectResize(
+        net.minecraft.client.renderer.GameRenderer gameRenderer,
+        int width,
+        int height
+    ) {
+        gameRenderer.resize(Beeeye.isStereoEnabled() ? width * 2 : width, height);
+    }
 
     @Inject(method = "renderLevel", at = @At("HEAD"), cancellable = true)
     private void beeeye$onRenderLevel(
@@ -108,80 +155,11 @@ public abstract class MixinGameRenderer {
         if (!beeeye$stereoReady) return;
         beeeye$stereoReady = false;
         StereoState.setPhase(RenderPhase.COMPOSITING);
-
-        RenderTarget mainTarget = minecraft.getMainRenderTarget();
-        RenderTarget leftFbo = StereoRenderer.getLeftEyeFbo();
-        RenderTarget rightFbo = StereoRenderer.getRightEyeFbo();
-        RenderTarget hudFbo = StereoRenderer.getHudFbo();
-        RenderTarget compositeRT = StereoRenderer.getCompositeTarget();
-        if (
-            leftFbo == null ||
-            rightFbo == null ||
-            hudFbo == null ||
-            compositeRT == null
-        ) return;
-
-        int fullW = mainTarget.width;
-        int fullH = mainTarget.height;
-        int halfW = fullW / 2;
-
-        int mainTex = GlTextureUtil.textureId(mainTarget.getColorTexture());
-        int leftTex = GlTextureUtil.textureId(leftFbo.getColorTexture());
-        int rightTex = GlTextureUtil.textureId(rightFbo.getColorTexture());
-        int hudTex = GlTextureUtil.textureId(hudFbo.getColorTexture());
-        int compositeTex = GlTextureUtil.textureId(compositeRT.getColorTexture());
-        if (
-            mainTex <= 0 ||
-            leftTex <= 0 ||
-            rightTex <= 0 ||
-            hudTex <= 0 ||
-            compositeTex <= 0
-        ) return;
-
-        GlFboCache cache = StereoRenderer.getGlFboCache();
-        int mainGl = cache.fbo(Slot.MAIN, mainTex);
-        int leftGl = cache.fbo(Slot.LEFT, leftTex);
-        int rightGl = cache.fbo(Slot.RIGHT, rightTex);
-        int hudGl = cache.fbo(Slot.HUD, hudTex);
-        int compositeGl = cache.fbo(Slot.COMPOSITE, compositeTex);
-
-        BlitRect eye = BlitRect.region(0, 0, halfW, fullH);
-        BlitRect leftHalf = eye;
-        BlitRect rightHalf = BlitRect.region(halfW, 0, halfW, fullH);
-
-        // Mods (e.g. Jade) may leave GL_SCISSOR_TEST enabled after HUD rendering.
-        // glBlitFramebuffer respects scissor and would clip or discard our blits.
-        boolean scissorWasEnabled = GL11.glIsEnabled(GL11.GL_SCISSOR_TEST);
-        if (scissorWasEnabled) GL11.glDisable(GL11.GL_SCISSOR_TEST);
-
-        // Eyes -> main target halves
-        beeeye$blit(leftGl, mainGl, eye, leftHalf);
-        beeeye$blit(rightGl, mainGl, eye, rightHalf);
-
-        // HUD -> both halves of composite buffer
-        StereoRenderer.clearFbo(compositeRT);
-        beeeye$blit(hudGl, compositeGl, eye, leftHalf);
-        beeeye$blit(hudGl, compositeGl, eye, rightHalf);
-
-        // Alpha-blend composite (HUD) onto main target.
-        // Scissor must stay OFF here — blitAndBlendToTexture uses a shader that
-        // respects GL_SCISSOR_TEST, so any active scissor (e.g. SS item-list clip)
-        // would mask out the portions of the HUD blend that fall outside the box.
-        GL30.glBindFramebuffer(GL30.GL_FRAMEBUFFER, 0);
-        compositeRT.blitAndBlendToTexture(mainTarget.getColorTextureView());
-
-        // Restore scissor only after all compositing is done.
-        if (scissorWasEnabled) GL11.glEnable(GL11.GL_SCISSOR_TEST);
-
-        // Convergence-offset crosshair (replaces vanilla crosshair suppressed by MixinGui)
-        BodyCrosshair.drawConvergenceCrosshair(mainGl, fullW, fullH);
-
-        // Body crosshair overlay
-        if (HeadTracker.isActive()) {
-            BodyCrosshair.draw(mainGl, fullW, fullH);
+        try {
+            StereoRenderer.composite(minecraft.getMainRenderTarget());
+        } finally {
+            StereoState.setPhase(RenderPhase.INACTIVE);
         }
-
-        StereoState.setPhase(RenderPhase.INACTIVE);
     }
 
     /**
@@ -207,6 +185,39 @@ public abstract class MixinGameRenderer {
         // Stereo: already processed per-eye — skip to avoid corrupting hudFbo
     }
 
+    /**
+     * Wrap GuiRenderer.render() with two stereo-specific GL fixups when active.
+     *
+     * windowRenderState.width — already set to half-width by extractWindow() during
+     * HUD_EXTRACT, so GuiRenderer builds a 240-unit ortho matching the per-eye canvas.
+     * No manual override needed here.
+     *
+     * hudFbo has leftEye as opaque background (initHudBackground), so GuiRenderer's
+     * fog/vignette pass composites correctly onto real world content, just as it would
+     * in vanilla. No pre-clear or blend-equation fixups are needed.
+     */
+    @Redirect(
+        method = "render",
+        at = @At(
+            value = "INVOKE",
+            target = "Lnet/minecraft/client/gui/render/GuiRenderer;render(Lcom/mojang/blaze3d/buffers/GpuBufferSlice;)V"
+        )
+    )
+    private void beeeye$redirectGuiRender(GuiRenderer guiRenderer, GpuBufferSlice fogBuffer) {
+        if (!beeeye$stereoReady) {
+            guiRenderer.render(fogBuffer);
+            return;
+        }
+        int dbgN = beeeye$dbgGuiFrame++;
+        boolean doDbg = (dbgN < DBG_GUI_FIRST) || (dbgN % DBG_GUI_INTERVAL == 0);
+
+        // GuiRenderer renders to hudFbo (leftEye bg). MixinGuiRenderer injects after
+        // draw() and replays the same draws to rightHudFbo before the draw list is cleared.
+        if (doDbg) StereoRenderer.debugLogHud("hud-left[pre-GUI]");
+        guiRenderer.render(fogBuffer);
+        if (doDbg) StereoRenderer.debugLogHud("hud-left[post-GUI]");
+    }
+
     // =========================================================================
     // Stereo frame orchestration
     // =========================================================================
@@ -215,12 +226,16 @@ public abstract class MixinGameRenderer {
     private void beeeye$renderStereoFrame(DeltaTracker deltaTracker) {
         RenderTarget mainTarget = minecraft.getMainRenderTarget();
         StereoRenderer.ensureFramebuffers(mainTarget.width, mainTarget.height);
+        GameRenderState grs = getGameRenderState();
 
         for (Eye eye : Eye.values()) {
             StereoState.setCurrentEye(eye);
             StereoState.setPhase(RenderPhase.EYE_RENDER);
             StereoRenderer.clearFbo(StereoState.getCurrentEyeFbo());
-            updateCamera(deltaTracker);
+            mainCamera.update(deltaTracker);
+            float partial = mainCamera.getCameraEntityPartialTicks(deltaTracker);
+            CameraRenderState cameraState = grs.levelRenderState.cameraRenderState;
+            mainCamera.extractRenderState(cameraState, partial);
 
             // Update convergence after LEFT camera setup — mainCamera now
             // includes head tracking, so rays match actual view direction.
@@ -238,6 +253,15 @@ public abstract class MixinGameRenderer {
             }
 
             beeeye$refreshGlobalUniforms(deltaTracker);
+            // Reset accumulated render state before per-eye extraction.
+            // Both vanilla's center-camera extractLevel and previous eye extractions append
+            // (not replace) to entityRenderStates, blockEntityRenderStates, and
+            // particlesRenderState. Without resetting first, LEFT eye doubles and RIGHT
+            // eye triples their counts, with mixed camera positions causing visible offsets.
+            // reset() clears entities/blockEntities but NOT particlesRenderState — reset both.
+            grs.levelRenderState.reset();
+            grs.levelRenderState.particlesRenderState.reset();
+            minecraft.levelRenderer.extractLevel(deltaTracker, mainCamera, partial);
             renderLevel(deltaTracker);
             minecraft.levelRenderer.doEntityOutline();
             // Post-processing effects (night vision, nausea, creeper outline, etc.) per eye.
@@ -256,100 +280,24 @@ public abstract class MixinGameRenderer {
         }
 
         StereoState.setCurrentEye(null);
-        StereoRenderer.clearFbo(StereoRenderer.getHudFbo());
-        // Force transparent GL clear color before HUD phase. Mods like Jade call glClear()
-        // on the HUD FBO (via getMainRenderTarget() redirect) using whatever the current
-        // GL clear color is. If alpha=1, hudFbo becomes opaque black and wipes the stereo
-        // world when composited. Setting (0,0,0,0) here ensures any such clear is transparent.
-        GL11.glClearColor(0, 0, 0, 0);
-        // Reset scissor before HUD phase. EYE_RENDER or a mod may have left GL_SCISSOR_TEST
-        // enabled, which would clip GUI rendering in HUD_CAPTURE.
+        // Pre-composite both eyes to main NOW, before GuiRenderer runs.
+        // GuiRenderer's fog/vignette pass needs an opaque background; it must render on top
+        // of an already-rendered world, exactly as vanilla expects. We give it that by
+        // pre-populating main AND hudFbo with eye content before entering HUD_CAPTURE.
+        StereoRenderer.compositeEyes(mainTarget);
+        // Copy left eye → hudFbo as opaque background for GuiRenderer.
+        // GuiRenderer renders to hudFbo (redirected by MixinMinecraft during HUD_CAPTURE).
+        // Result: hudFbo = leftEye + HUD correctly blended.
+        StereoRenderer.initHudBackground();
+        // Reset scissor: EYE_RENDER or a mod may have left GL_SCISSOR_TEST enabled.
         if (GL11.glIsEnabled(GL11.GL_SCISSOR_TEST)) GL11.glDisable(GL11.GL_SCISSOR_TEST);
         beeeye$stereoReady = true;
         StereoState.setPhase(RenderPhase.HUD_CAPTURE);
     }
 
     // =========================================================================
-    // Head-tracked interaction picking
+    // Uniform refresh
     // =========================================================================
-
-    @Inject(method = "pick", at = @At("TAIL"))
-    private void beeeye$overridePick(float partialTick, CallbackInfo ci) {
-        if (!Beeeye.isStereoEnabled() || !HeadTracker.isActive()) return;
-        if (minecraft.player == null || minecraft.level == null) return;
-
-        Vec3 eyePos = minecraft.player.getEyePosition(partialTick);
-        Vec3 forward = new Vec3(mainCamera.forwardVector());
-
-        double blockRange = minecraft.player.blockInteractionRange();
-        double entityRange = minecraft.player.entityInteractionRange();
-        double maxRange = Math.max(blockRange, entityRange);
-        Vec3 endPos = eyePos.add(forward.scale(maxRange));
-
-        // Block raycast
-        HitResult blockHit = minecraft.level.clip(
-            new ClipContext(
-                eyePos,
-                endPos,
-                ClipContext.Block.OUTLINE,
-                ClipContext.Fluid.NONE,
-                minecraft.player
-            )
-        );
-
-        // Entity raycast
-        AABB searchBox = new AABB(eyePos, endPos).inflate(1.0);
-        EntityHitResult entityHit = ProjectileUtil.getEntityHitResult(
-            minecraft.player,
-            eyePos,
-            endPos,
-            searchBox,
-            EntitySelector.CAN_BE_PICKED,
-            entityRange * entityRange
-        );
-
-        // Pick closest
-        HitResult best = blockHit;
-        if (entityHit != null) {
-            double blockDist =
-                blockHit.getType() != HitResult.Type.MISS
-                    ? blockHit.getLocation().distanceToSqr(eyePos)
-                    : Double.MAX_VALUE;
-            double entityDist = entityHit.getLocation().distanceToSqr(eyePos);
-            if (entityDist < blockDist) best = entityHit;
-        }
-
-        minecraft.hitResult = best;
-        minecraft.crosshairPickEntity =
-            best instanceof EntityHitResult ehr ? ehr.getEntity() : null;
-    }
-
-    // =========================================================================
-    // GL helpers
-    // =========================================================================
-
-    @Unique
-    private static void beeeye$blit(
-        int readFbo,
-        int drawFbo,
-        BlitRect src,
-        BlitRect dst
-    ) {
-        GL30.glBindFramebuffer(GL30.GL_READ_FRAMEBUFFER, readFbo);
-        GL30.glBindFramebuffer(GL30.GL_DRAW_FRAMEBUFFER, drawFbo);
-        GL30.glBlitFramebuffer(
-            src.x0(),
-            src.y0(),
-            src.x1(),
-            src.y1(),
-            dst.x0(),
-            dst.y0(),
-            dst.x1(),
-            dst.y1(),
-            GL11.GL_COLOR_BUFFER_BIT,
-            GL11.GL_NEAREST
-        );
-    }
 
     @Unique
     private void beeeye$refreshGlobalUniforms(DeltaTracker deltaTracker) {
