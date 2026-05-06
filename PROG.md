@@ -10,5 +10,6 @@
 - Before adding features, check existing open-source for equivalent functionality.
 - When fixing a bug, search for the same condition elsewhere and fix all instances.
 - Add sufficient debug logging during development; strip it for release.
-- After two unsuccessful fix attempts, continue attempting fixes but assume further attempts may also fail, and significantly increase trace logging at key execution points to capture real runtime behavior and guide subsequent changes.
-- do not guess the api when documentation exists, read it.
+- After two failed fix attempts: keep trying, but stop reasoning from assumptions — instrument heavily (log every relevant value at every key point) and let runtime evidence drive the next change.
+- If docs or source exist, read them first before guessing API shape.
+- Workflow: implement → build → install → wait for Vany's QA → commit. No commit before QA confirms it works.
