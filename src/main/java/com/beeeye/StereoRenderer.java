@@ -5,7 +5,6 @@ import com.mojang.blaze3d.pipeline.TextureTarget;
 import com.mojang.blaze3d.systems.CommandEncoder;
 import com.mojang.blaze3d.systems.RenderPass;
 import com.mojang.blaze3d.systems.RenderSystem;
-import com.mojang.blaze3d.textures.FilterMode;
 import com.mojang.blaze3d.textures.GpuSampler;
 import com.mojang.blaze3d.textures.GpuTexture;
 import com.mojang.blaze3d.textures.GpuTextureView;
@@ -247,7 +246,6 @@ public class StereoRenderer {
         GpuTexture mainTex = mainTarget.getColorTexture();
         if (mainTex == null) return;
 
-        GpuSampler nearest = RenderSystem.getSamplerCache().getClampToEdge(FilterMode.NEAREST);
         int n = debugCallCount++;
         boolean doDebug = (n < DEBUG_ALWAYS_FIRST) || (n % DEBUG_INTERVAL == 0);
 
@@ -270,14 +268,25 @@ public class StereoRenderer {
         // Blit hudFbo (leftEye + HUD) over main left half. hudFbo is opaque (all alpha=255
         // from leftEye background), so ENTITY_OUTLINE_BLIT fully replaces the left half.
         // Disable GL_SCISSOR_TEST: mods/MC may leave it enabled and clip the triangle.
+        // Use raw glBlitFramebuffer, not ENTITY_OUTLINE_BLIT.
+        // Mods (e.g. minimaps) render icons with transparent backgrounds — their blend mode
+        // can zero out the alpha channel of the underlying opaque minimap pixels. ENTITY_OUTLINE_BLIT
+        // uses src_alpha for color blending, so alpha=0 pixels are invisible and the world shows
+        // through. glBlitFramebuffer copies RGBA directly regardless of alpha, so the minimap
+        // color (correctly preserved by SRC_ALPHA,ONE_MINUS_SRC_ALPHA color blend) is always copied.
+        int rightHudTexId = GlTextureUtil.textureId(rightHudFboRt.getColorTexture());
+        int hudGl      = glFboCache.fbo(GlFboCache.Slot.HUD,       hudTexId);
+        int rightHudGl = glFboCache.fbo(GlFboCache.Slot.HUD_RIGHT, rightHudTexId);
+        int mainGl     = glFboCache.fbo(GlFboCache.Slot.MAIN,      mainTexId);
         boolean scissorOn = GL11.glIsEnabled(GL11.GL_SCISSOR_TEST);
         if (scissorOn) GL11.glDisable(GL11.GL_SCISSOR_TEST);
         try {
-            GpuTextureView mainView      = mainTarget.getColorTextureView();
-            GpuTextureView hudView       = hudFboRt.getColorTextureView();
-            GpuTextureView rightHudView  = rightHudFboRt.getColorTextureView();
-            blitWithViewport(mainView, hudView,      nearest, 0,     0, halfW, fullH);
-            blitWithViewport(mainView, rightHudView, nearest, halfW, 0, halfW, fullH);
+            GL30.glBindFramebuffer(GL30.GL_FRAMEBUFFER, mainGl);
+            GL30.glBindFramebuffer(GL30.GL_READ_FRAMEBUFFER, hudGl);
+            GL30.glBlitFramebuffer(0, 0, halfW, fullH, 0,     0, halfW, fullH, GL11.GL_COLOR_BUFFER_BIT, GL11.GL_NEAREST);
+            GL30.glBindFramebuffer(GL30.GL_READ_FRAMEBUFFER, rightHudGl);
+            GL30.glBlitFramebuffer(0, 0, halfW, fullH, halfW, 0, fullW, fullH, GL11.GL_COLOR_BUFFER_BIT, GL11.GL_NEAREST);
+            GL30.glBindFramebuffer(GL30.GL_FRAMEBUFFER, 0);
             if (doDebug && mainTexId > 0) Beeeye.LOGGER.info("  DST main after hudBlit left={} right={}",
                 samplePixel(glFboCache.fbo(GlFboCache.Slot.MAIN, mainTexId), halfW/2,       fullH/2),
                 samplePixel(glFboCache.fbo(GlFboCache.Slot.MAIN, mainTexId), halfW+halfW/2, fullH/2));
@@ -287,7 +296,6 @@ public class StereoRenderer {
 
         // Crosshairs drawn on both halves via raw GL.
         if (mainTexId > 0) {
-            int mainGl = glFboCache.fbo(GlFboCache.Slot.MAIN, mainTexId);
             BodyCrosshair.drawConvergenceCrosshair(mainGl, fullW, fullH);
             if (HeadTracker.isActive()) {
                 BodyCrosshair.draw(mainGl, fullW, fullH);
